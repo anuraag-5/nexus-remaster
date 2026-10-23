@@ -1,16 +1,35 @@
-import express from "express";
+import cors from "cors";
 import helmet from "helmet";
+import express from "express";
 import { pinoHttp } from "pino-http";
+import type { Request, RequestHandler } from "express";
 
 import { logger } from "./lib/logger.js";
 
 type AppDependencies = {
   checkDatabase: () => Promise<void>;
+  authMiddleware: RequestHandler;
+  getAuthenticatedUserId: (req: Request) => string | null;
+  webOrigin: string;
 };
 
-export function createApp({ checkDatabase }: AppDependencies) {
+export function createApp({
+  checkDatabase,
+  authMiddleware,
+  getAuthenticatedUserId,
+  webOrigin,
+}: AppDependencies) {
   const app = express();
+  
+  app.use(authMiddleware);
 
+  app.use(
+    cors({
+      origin: webOrigin,
+      methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allowedHeaders: ["Content-Type", "Authorization"],
+    }),
+  );
   app.disable("x-powered-by");
 
   app.use(helmet());
@@ -45,6 +64,22 @@ export function createApp({ checkDatabase }: AppDependencies) {
         },
       });
     }
+  });
+
+  app.get("/api/v1/me", (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+
+    if (!userId) {
+      res.status(401).json({
+        error: {
+          code: "UNAUTHENTICATED",
+          message: "Authentication required",
+        },
+      });
+      return;
+    }
+
+    res.status(200).json({ userId });
   });
 
   return app;

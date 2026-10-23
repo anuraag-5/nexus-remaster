@@ -1,9 +1,27 @@
 import request from "supertest";
-import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
+import { describe, expect, it } from "vitest";
+import type { RequestHandler } from "express";
 
-function createTestApp(checkDatabase: () => Promise<void> = async () => {}) {
-  return createApp({ checkDatabase });
+type TestAppOptions = {
+  checkDatabase?: () => Promise<void>;
+  userId?: string | null;
+};
+
+function createTestApp({
+  checkDatabase = async () => {},
+  userId = null,
+}: TestAppOptions = {}) {
+  const authMiddleware: RequestHandler = (_req, _res, next) => {
+    next();
+  };
+
+  return createApp({
+    checkDatabase,
+    authMiddleware,
+    getAuthenticatedUserId: () => userId,
+    webOrigin: "http://localhost:3000",
+  });
 }
 
 describe("GET /health/live", () => {
@@ -40,8 +58,10 @@ describe("GET /health/ready", () => {
   });
 
   it("returns 503 when the database route check fails.", async () => {
-    const app = createTestApp(async () => {
-      throw new Error("Database connection failed");
+    const app = createTestApp({
+      checkDatabase: async () => {
+        throw new Error("Database connection failed");
+      },
     });
 
     const response = await request(app).get("/health/ready");
@@ -52,6 +72,35 @@ describe("GET /health/ready", () => {
       checks: {
         database: "error",
       },
+    });
+  });
+});
+
+describe("GET /api/v1/me", () => {
+  it("returns 401 when the user is not authenticated", async () => {
+    const app = createTestApp();
+
+    const response = await request(app).get("/api/v1/me");
+
+    expect(response.status).toBe(401);
+    expect(response.body).toEqual({
+      error: {
+        code: "UNAUTHENTICATED",
+        message: "Authentication required",
+      },
+    });
+  });
+
+  it("returns the user ID when authenticated", async () => {
+    const app = createTestApp({
+      userId: "user_test_123",
+    });
+
+    const response = await request(app).get("/api/v1/me");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      userId: "user_test_123",
     });
   });
 });

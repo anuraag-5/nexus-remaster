@@ -1,3 +1,4 @@
+import { clerkMiddleware, getAuth } from "@clerk/express";
 import { env } from "./config/env.js";
 import { pool } from "./lib/db.js";
 import { createApp } from "./app.js";
@@ -13,6 +14,17 @@ const app = createApp({
   checkDatabase: async () => {
     await pool.query("SELECT 1");
   },
+
+  authMiddleware: clerkMiddleware({
+    authorizedParties: ["http://localhost:3000"],
+  }),
+
+  getAuthenticatedUserId: (req) => {
+    const auth = getAuth(req);
+    return auth.isAuthenticated ? auth.userId : null;
+  },
+
+  webOrigin: env.WEB_ORIGIN,
 });
 
 const server = app.listen(port, "0.0.0.0", () => {

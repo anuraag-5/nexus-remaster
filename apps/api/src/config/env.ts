@@ -19,6 +19,10 @@ const envSchema = z.object({
         value.startsWith("postgresql://") || value.startsWith("postgres://"),
       "DATABASE_URL must be a PostgreSQL connection URL",
     ),
+
+  CLERK_PUBLISHABLE_KEY: z.string().min(1),
+  CLERK_SECRET_KEY: z.string().min(1),
+  WEB_ORIGIN: z.url().default("http://localhost:3000"),
 });
 
 const result = envSchema.safeParse(process.env);
