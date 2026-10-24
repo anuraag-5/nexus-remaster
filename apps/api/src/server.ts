@@ -1,14 +1,17 @@
-import { clerkMiddleware, getAuth } from "@clerk/express";
 import { env } from "./config/env.js";
 import { pool } from "./lib/db.js";
-import { createApp } from "./app.js";
 import { logger } from "./lib/logger.js";
+import { createApp } from "./app.js";
+import { createWorkspaceService } from "./workspaces/workspace.service.js";
+import { clerkMiddleware, getAuth } from "@clerk/express";
 
 const port = env.PORT;
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
 }
+
+const createWorkspace = createWorkspaceService(pool);
 
 const app = createApp({
   checkDatabase: async () => {
@@ -21,10 +24,12 @@ const app = createApp({
 
   getAuthenticatedUserId: (req) => {
     const auth = getAuth(req);
+
     return auth.isAuthenticated ? auth.userId : null;
   },
 
   webOrigin: env.WEB_ORIGIN,
+  createWorkspace,
 });
 
 const server = app.listen(port, "0.0.0.0", () => {

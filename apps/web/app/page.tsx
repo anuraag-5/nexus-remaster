@@ -1,4 +1,5 @@
 import { ApiSessionCheck } from "./components/api-session-check";
+import { WorkspaceCreator } from "./components/workspace-creator";
 import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
 
 export default function HomePage() {
@@ -31,6 +32,7 @@ export default function HomePage() {
         <p>You're signed in to Nexus.</p>
         <UserButton />
         <ApiSessionCheck />
+        <WorkspaceCreator />
       </Show>
     </main>
   );

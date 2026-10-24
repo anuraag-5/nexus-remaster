@@ -3,7 +3,12 @@ import helmet from "helmet";
 import express from "express";
 import { pinoHttp } from "pino-http";
 import type { Request, RequestHandler } from "express";
+import { createWorkspaceRouter } from "./workspaces/workspace.routes.js";
 
+import type {
+  CreateWorkspaceInput,
+  Workspace,
+} from "./workspaces/workspace.service.js";
 import { logger } from "./lib/logger.js";
 
 type AppDependencies = {
@@ -11,6 +16,7 @@ type AppDependencies = {
   authMiddleware: RequestHandler;
   getAuthenticatedUserId: (req: Request) => string | null;
   webOrigin: string;
+  createWorkspace: (input: CreateWorkspaceInput) => Promise<Workspace>;
 };
 
 export function createApp({
@@ -18,9 +24,10 @@ export function createApp({
   authMiddleware,
   getAuthenticatedUserId,
   webOrigin,
+  createWorkspace,
 }: AppDependencies) {
   const app = express();
-  
+
   app.use(authMiddleware);
 
   app.use(
@@ -30,11 +37,20 @@ export function createApp({
       allowedHeaders: ["Content-Type", "Authorization"],
     }),
   );
+  
   app.disable("x-powered-by");
 
   app.use(helmet());
   app.use(pinoHttp({ logger }));
   app.use(express.json({ limit: "1mb" }));
+  
+  app.use(
+    "/api/v1/workspaces",
+    createWorkspaceRouter({
+      createWorkspace,
+      getAuthenticatedUserId,
+    }),
+  );
 
   // Liveness: is the API process responding?
   app.get("/health/live", (_req, res) => {
