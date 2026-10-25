@@ -1,6 +1,7 @@
 import type {
   CreateWorkspaceInput,
   Workspace,
+  WorkspaceSummary,
 } from "../src/workspaces/workspace.service.js";
 import request from "supertest";
 import { createApp } from "../src/app.js";
@@ -11,12 +12,14 @@ type TestAppOptions = {
   checkDatabase?: () => Promise<void>;
   userId?: string | null;
   createWorkspace?: (input: CreateWorkspaceInput) => Promise<Workspace>;
+  listWorkspaces? : (userId: string) => Promise<WorkspaceSummary[]>;
 };
 
 function createTestApp({
   checkDatabase = async () => {},
   userId = null,
   createWorkspace,
+  listWorkspaces
 }: TestAppOptions = {}) {
   const authMiddleware: RequestHandler = (_req, _res, next) => {
     next();
@@ -36,6 +39,7 @@ function createTestApp({
     getAuthenticatedUserId: () => userId,
     webOrigin: "http://localhost:3000",
     createWorkspace: createWorkspace ?? defaultCreateWorkspace,
+    listWorkspaces: listWorkspaces ?? (async () => []),
   });
 }
 
@@ -212,6 +216,66 @@ describe("POST /api/v1/workspaces", () => {
 
     expect(response.status).toBe(400);
     expect(serviceCalled).toBe(false);
+  });
+});
+
+describe("GET /api/v1/workspaces", () => {
+  it("requires an authenticated user", async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .get("/api/v1/workspaces");
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe("UNAUTHENTICATED");
+  });
+
+  it("lists workspaces for the authenticated user", async () => {
+    let receivedUserId: string | undefined;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+
+      listWorkspaces: async (userId) => {
+        receivedUserId = userId;
+
+        return [
+          {
+            id: "workspace_test_123",
+            name: "Stacklify",
+            role: "owner",
+            createdAt: "2026-10-24T11:22:48.163Z",
+          },
+        ];
+      },
+    });
+
+    const response = await request(app)
+      .get("/api/v1/workspaces");
+
+    expect(response.status).toBe(200);
+    expect(receivedUserId).toBe("user_test_123");
+
+    expect(response.body.data).toEqual([
+      {
+        id: "workspace_test_123",
+        name: "Stacklify",
+        role: "owner",
+        createdAt: "2026-10-24T11:22:48.163Z",
+      },
+    ]);
+  });
+
+  it("returns an empty array when the user has no workspaces", async () => {
+    const app = createTestApp({
+      userId: "user_without_workspaces",
+    });
+
+    const response = await request(app)
+      .get("/api/v1/workspaces");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([]);
   });
 });
 

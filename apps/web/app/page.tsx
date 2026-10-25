@@ -1,3 +1,4 @@
+import { WorkspaceList } from "./components/workspace-list";
 import { ApiSessionCheck } from "./components/api-session-check";
 import { WorkspaceCreator } from "./components/workspace-creator";
 import { Show, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
@@ -33,6 +34,7 @@ export default function HomePage() {
         <UserButton />
         <ApiSessionCheck />
         <WorkspaceCreator />
+        <WorkspaceList />
       </Show>
     </main>
   );

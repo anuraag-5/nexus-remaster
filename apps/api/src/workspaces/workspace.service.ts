@@ -19,8 +19,25 @@ type WorkspaceRow = {
   created_at: Date;
 };
 
+export type WorkspaceRole = "owner" | "admin" | "member";
+
+export type WorkspaceSummary = {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  createdAt: string;
+};
+
+type WorkspaceMembershipRow = {
+  id: string;
+  name: string;
+  role: WorkspaceRole;
+  created_at: Date;
+};
+
 export function createWorkspaceService(pool: Pool) {
-  return async function createWorkspace(
+  
+  async function createWorkspace(
     input: CreateWorkspaceInput,
   ): Promise<Workspace> {
     const client = await pool.connect();
@@ -77,5 +94,33 @@ export function createWorkspaceService(pool: Pool) {
     } finally {
       client.release();
     }
+  }
+  
+  async function listWorkspaces(userId: string): Promise<WorkspaceSummary[]> {
+    const result = await pool.query<WorkspaceMembershipRow>(
+      `SELECT
+       w.id,
+       w.name,
+       wm.role,
+       w.created_at
+     FROM workspaces AS w
+     INNER JOIN workspace_members AS wm
+       ON wm.workspace_id = w.id
+     WHERE wm.auth_provider_user_id = $1
+     ORDER BY w.created_at DESC`,
+      [userId],
+    );
+
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      role: row.role,
+      createdAt: row.created_at.toISOString(),
+    }));
+  }
+
+  return {
+    createWorkspace,
+    listWorkspaces,
   };
 }

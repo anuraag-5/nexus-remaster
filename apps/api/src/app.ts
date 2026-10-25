@@ -8,6 +8,7 @@ import { createWorkspaceRouter } from "./workspaces/workspace.routes.js";
 import type {
   CreateWorkspaceInput,
   Workspace,
+  WorkspaceSummary,
 } from "./workspaces/workspace.service.js";
 import { logger } from "./lib/logger.js";
 
@@ -17,6 +18,7 @@ type AppDependencies = {
   getAuthenticatedUserId: (req: Request) => string | null;
   webOrigin: string;
   createWorkspace: (input: CreateWorkspaceInput) => Promise<Workspace>;
+  listWorkspaces: (userId: string) => Promise<WorkspaceSummary[]>;
 };
 
 export function createApp({
@@ -25,6 +27,7 @@ export function createApp({
   getAuthenticatedUserId,
   webOrigin,
   createWorkspace,
+  listWorkspaces
 }: AppDependencies) {
   const app = express();
 
@@ -49,6 +52,7 @@ export function createApp({
     createWorkspaceRouter({
       createWorkspace,
       getAuthenticatedUserId,
+      listWorkspaces
     }),
   );
 

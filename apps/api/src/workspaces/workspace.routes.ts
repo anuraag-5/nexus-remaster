@@ -1,11 +1,17 @@
-import { Router, type Request } from "express";
 import { z } from "zod";
-
 import { logger } from "../lib/logger.js";
-import type { CreateWorkspaceInput, Workspace } from "./workspace.service.js";
+import { Router, type Request } from "express";
+import type {
+  CreateWorkspaceInput,
+  Workspace,
+  WorkspaceSummary,
+} from "./workspace.service.js";
 
 type WorkspaceRouteDependencies = {
   createWorkspace: (input: CreateWorkspaceInput) => Promise<Workspace>;
+
+  listWorkspaces: (userId: string) => Promise<WorkspaceSummary[]>;
+
   getAuthenticatedUserId: (req: Request) => string | null;
 };
 
@@ -19,6 +25,7 @@ const createWorkspaceSchema = z.strictObject({
 
 export function createWorkspaceRouter({
   createWorkspace,
+  listWorkspaces,
   getAuthenticatedUserId,
 }: WorkspaceRouteDependencies) {
   const router = Router();
@@ -71,6 +78,34 @@ export function createWorkspaceRouter({
         error: {
           code: "INTERNAL_SERVER_ERROR",
           message: "Unable to create workspace",
+        },
+      });
+    }
+  });
+
+  router.get("/", async (req, res) => {
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      res.status(401).json({
+        error: {
+          code: "UNAUTHENTICATED",
+          message: "Authentication required",
+        },
+      });
+      return;
+    }
+
+    try {
+      const workspaces = await listWorkspaces(userId);
+      res.status(200).json({
+        data: workspaces,
+      });
+    } catch (error) {
+      logger.error({ err: error }, "Workspace listing failed");
+      res.status(500).json({
+        error: {
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Unable to list workspaces",
         },
       });
     }

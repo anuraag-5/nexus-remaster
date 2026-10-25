@@ -11,7 +11,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
 }
 
-const createWorkspace = createWorkspaceService(pool);
+const workspaceService = createWorkspaceService(pool);
 
 const app = createApp({
   checkDatabase: async () => {
@@ -29,7 +29,8 @@ const app = createApp({
   },
 
   webOrigin: env.WEB_ORIGIN,
-  createWorkspace,
+  createWorkspace: workspaceService.createWorkspace,
+  listWorkspaces: workspaceService.listWorkspaces,
 });
 
 const server = app.listen(port, "0.0.0.0", () => {
