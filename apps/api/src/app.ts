@@ -11,6 +11,13 @@ import type {
   WorkspaceSummary,
 } from "./workspaces/workspace.service.js";
 import { logger } from "./lib/logger.js";
+import { createMonitorRouter } from "./monitors/monitor.routes.js";
+
+import type {
+  CreateMonitorInput,
+  ListMonitorsInput,
+  Monitor,
+} from "./monitors/monitor.service.js";
 
 type AppDependencies = {
   checkDatabase: () => Promise<void>;
@@ -19,6 +26,8 @@ type AppDependencies = {
   webOrigin: string;
   createWorkspace: (input: CreateWorkspaceInput) => Promise<Workspace>;
   listWorkspaces: (userId: string) => Promise<WorkspaceSummary[]>;
+  createMonitor: (input: CreateMonitorInput) => Promise<Monitor>;
+  listMonitors: (input: ListMonitorsInput) => Promise<Monitor[]>;
 };
 
 export function createApp({
@@ -27,7 +36,9 @@ export function createApp({
   getAuthenticatedUserId,
   webOrigin,
   createWorkspace,
-  listWorkspaces
+  listWorkspaces,
+  createMonitor,
+  listMonitors,
 }: AppDependencies) {
   const app = express();
 
@@ -40,19 +51,28 @@ export function createApp({
       allowedHeaders: ["Content-Type", "Authorization"],
     }),
   );
-  
+
   app.disable("x-powered-by");
 
   app.use(helmet());
   app.use(pinoHttp({ logger }));
   app.use(express.json({ limit: "1mb" }));
-  
+
   app.use(
     "/api/v1/workspaces",
     createWorkspaceRouter({
       createWorkspace,
       getAuthenticatedUserId,
-      listWorkspaces
+      listWorkspaces,
+    }),
+  );
+
+  app.use(
+    "/api/v1/workspaces/:workspaceId/monitors",
+    createMonitorRouter({
+      createMonitor,
+      listMonitors,
+      getAuthenticatedUserId,
     }),
   );
 

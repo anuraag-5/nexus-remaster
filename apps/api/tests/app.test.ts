@@ -7,19 +7,41 @@ import request from "supertest";
 import { createApp } from "../src/app.js";
 import { describe, expect, it } from "vitest";
 import type { RequestHandler } from "express";
+import { CreateMonitorInput, ListMonitorsInput, Monitor } from "../src/monitors/monitor.service.js";
 
 type TestAppOptions = {
   checkDatabase?: () => Promise<void>;
   userId?: string | null;
   createWorkspace?: (input: CreateWorkspaceInput) => Promise<Workspace>;
   listWorkspaces? : (userId: string) => Promise<WorkspaceSummary[]>;
+  createMonitor? : (input: CreateMonitorInput) => Promise<Monitor>;
+  listMonitors? : (input: ListMonitorsInput) => Promise<Monitor[]>;
 };
+
+const makeTestMonitor = (
+  input: CreateMonitorInput,
+): Monitor => ({
+  id: "monitor_test_123",
+  workspaceId: input.workspaceId,
+  name: input.name,
+  url: input.url,
+  intervalSeconds: input.intervalSeconds,
+  timeoutMs: input.timeoutMs,
+  isEnabled: true,
+  currentStatus: "unknown",
+  nextCheckAt: "2026-10-26T00:00:00.000Z",
+  lastCheckedAt: null,
+  createdAt: "2026-10-26T00:00:00.000Z",
+  updatedAt: "2026-10-26T00:00:00.000Z",
+});
 
 function createTestApp({
   checkDatabase = async () => {},
   userId = null,
   createWorkspace,
-  listWorkspaces
+  listWorkspaces,
+  createMonitor,
+  listMonitors
 }: TestAppOptions = {}) {
   const authMiddleware: RequestHandler = (_req, _res, next) => {
     next();
@@ -40,6 +62,8 @@ function createTestApp({
     webOrigin: "http://localhost:3000",
     createWorkspace: createWorkspace ?? defaultCreateWorkspace,
     listWorkspaces: listWorkspaces ?? (async () => []),
+    createMonitor: createMonitor ?? (async (input) => makeTestMonitor(input)),
+    listMonitors: listMonitors ?? (async () => []),
   });
 }
 

@@ -2,6 +2,7 @@ import { env } from "./config/env.js";
 import { pool } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { createApp } from "./app.js";
+import { createMonitorService } from "./monitors/monitor.service.js";
 import { createWorkspaceService } from "./workspaces/workspace.service.js";
 import { clerkMiddleware, getAuth } from "@clerk/express";
 
@@ -12,6 +13,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) {
 }
 
 const workspaceService = createWorkspaceService(pool);
+const monitorService = createMonitorService(pool);
 
 const app = createApp({
   checkDatabase: async () => {
@@ -31,6 +33,8 @@ const app = createApp({
   webOrigin: env.WEB_ORIGIN,
   createWorkspace: workspaceService.createWorkspace,
   listWorkspaces: workspaceService.listWorkspaces,
+  createMonitor: monitorService.createMonitor,
+  listMonitors: monitorService.listMonitors,
 });
 
 const server = app.listen(port, "0.0.0.0", () => {
