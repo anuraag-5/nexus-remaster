@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { z } from "zod";
+import { parseMonitorUrlCandidate } from "./monitor-url-policy.js";
 
 import { logger } from "../lib/logger.js";
 import {
@@ -29,16 +30,19 @@ const createMonitorSchema = z.strictObject({
   url: z
     .string()
     .trim()
-    .pipe(z.url())
-    .refine((value) => {
-      const parsedUrl = new URL(value);
+    .transform((value, context) => {
+      try {
+        return parseMonitorUrlCandidate(value).toString();
+      } catch (error) {
+        context.addIssue({
+          code: "custom",
+          message:
+            error instanceof Error ? error.message : "The URL is not allowed.",
+        });
 
-      return (
-        (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") &&
-        parsedUrl.username === "" &&
-        parsedUrl.password === ""
-      );
-    }, "URL must use HTTP or HTTPS and must not contain credentials"),
+        return z.NEVER;
+      }
+    }),
 
   intervalSeconds: z.number().int().min(30).max(86400).default(300),
 

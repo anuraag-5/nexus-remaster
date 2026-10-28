@@ -7,6 +7,7 @@ import request from "supertest";
 import { createApp } from "../src/app.js";
 import { describe, expect, it } from "vitest";
 import type { RequestHandler } from "express";
+import { WorkspaceAccessError } from "../src/monitors/monitor.service.js";
 import { CreateMonitorInput, ListMonitorsInput, Monitor } from "../src/monitors/monitor.service.js";
 
 type TestAppOptions = {
@@ -300,6 +301,207 @@ describe("GET /api/v1/workspaces", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data).toEqual([]);
+  });
+});
+
+
+const workspaceId = "b16c2fa2-ee2b-4f0e-a545-1ccd8e46f85c";
+
+describe("POST /api/v1/workspaces/:workspaceId/monitors", () => {
+  it("requires an authenticated user", async () => {
+    let serviceCalled = false;
+
+    const app = createTestApp({
+      createMonitor: async (input) => {
+        serviceCalled = true;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+      });
+
+    expect(response.status).toBe(401);
+    expect(serviceCalled).toBe(false);
+  });
+
+  it("creates a monitor using the authenticated user's identity", async () => {
+    let receivedInput: CreateMonitorInput | undefined;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        receivedInput = input;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "  Homepage  ",
+        url: "https://example.com/health",
+      });
+
+    expect(response.status).toBe(201);
+
+    expect(receivedInput).toEqual({
+      workspaceId,
+      userId: "user_test_123",
+      name: "Homepage",
+      url: "https://example.com/health",
+      intervalSeconds: 300,
+      timeoutMs: 10000,
+    });
+
+    expect(response.body.data).toMatchObject({
+      workspaceId,
+      name: "Homepage",
+      url: "https://example.com/health",
+      intervalSeconds: 300,
+      timeoutMs: 10000,
+      currentStatus: "unknown",
+    });
+  });
+
+  it("rejects non-HTTP URLs", async () => {
+    let serviceCalled = false;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        serviceCalled = true;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Invalid target",
+        url: "ftp://example.com",
+      });
+
+    expect(response.status).toBe(400);
+    expect(serviceCalled).toBe(false);
+  });
+
+  it("rejects an owner ID supplied by the client", async () => {
+    let serviceCalled = false;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        serviceCalled = true;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+        ownerUserId: "user_attacker",
+      });
+
+    expect(response.status).toBe(400);
+    expect(serviceCalled).toBe(false);
+  });
+
+  it("returns 404 when the user cannot access the workspace", async () => {
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async () => {
+        throw new WorkspaceAccessError();
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+      });
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("WORKSPACE_NOT_FOUND");
+  });
+});
+
+describe("GET /api/v1/workspaces/:workspaceId/monitors", () => {
+  it("requires an authenticated user", async () => {
+    const app = createTestApp();
+
+    const response = await request(app)
+      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+
+    expect(response.status).toBe(401);
+  });
+
+  it("lists monitors for the authenticated user's workspace", async () => {
+    let receivedInput: ListMonitorsInput | undefined;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      listMonitors: async (input) => {
+        receivedInput = input;
+
+        return [
+          {
+            id: "monitor_test_123",
+            workspaceId,
+            name: "Homepage",
+            url: "https://example.com",
+            intervalSeconds: 300,
+            timeoutMs: 10000,
+            isEnabled: true,
+            currentStatus: "unknown",
+            nextCheckAt: "2026-10-26T00:00:00.000Z",
+            lastCheckedAt: null,
+            createdAt: "2026-10-26T00:00:00.000Z",
+            updatedAt: "2026-10-26T00:00:00.000Z",
+          },
+        ];
+      },
+    });
+
+    const response = await request(app)
+      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+
+    expect(response.status).toBe(200);
+
+    expect(receivedInput).toEqual({
+      workspaceId,
+      userId: "user_test_123",
+    });
+
+    expect(response.body.data).toHaveLength(1);
+    expect(response.body.data[0]).toMatchObject({
+      id: "monitor_test_123",
+      workspaceId,
+      name: "Homepage",
+      currentStatus: "unknown",
+    });
+  });
+
+  it("returns 404 when the user cannot access the workspace", async () => {
+    const app = createTestApp({
+      userId: "user_test_123",
+      listMonitors: async () => {
+        throw new WorkspaceAccessError();
+      },
+    });
+
+    const response = await request(app)
+      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+
+    expect(response.status).toBe(404);
+    expect(response.body.error.code).toBe("WORKSPACE_NOT_FOUND");
   });
 });
 
