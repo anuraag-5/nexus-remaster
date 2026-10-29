@@ -124,7 +124,7 @@ const requestPinnedAddress: PinnedRequest = (url, address, timeoutMs) => {
         request = httpsRequest(
           {
             ...options,
-            servername: url.hostname,
+            servername: url.host,
             rejectUnauthorized: true,
           },
           onResponse,
@@ -331,7 +331,7 @@ export async function checkMonitorUrl(
 
       // Resolve and validate all addresses before connecting.
       const addresses = await withTimeout(
-        resolvePublicMonitorHostname(currentUrl, dnsLookup),
+        resolvePublicMonitorHostname(currentUrl, dnsLookup), // Default: True DNS lookup
         remainingMs,
       );
 

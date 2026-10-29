@@ -60,7 +60,7 @@ export async function resolvePublicMonitorHostname(
   let addresses: readonly ResolvedAddress[];
 
   try {
-    addresses = await dnsLookup(url.hostname);
+    addresses = await dnsLookup(url.hostname); // hostname doesn't get the port: https:example.com/81 -> example.com
   } catch {
     throw new MonitorUrlPolicyError("The hostname could not be resolved.");
   }

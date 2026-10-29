@@ -1,0 +1,104 @@
+# Nexus Remaster — Development Log
+
+> **Updated:** 29 October 2026  
+> **Target:** End-to-end portfolio MVP by **21 November 2026**. Aim to finish the planned work by 19 November and reserve 20–21 November for critical fixes.  
+> **Rule:** Record what is implemented and verified separately from what is planned.
+
+## Goal
+
+Build a production-oriented website-monitoring SaaS that demonstrates more than CRUD: secure outbound checks, durable check history, Redis/BullMQ processing, retry and recovery behavior, idempotent persistence, two-country probes (India + USA), subscription entitlements, observability, deployment and a demonstrable end-to-end workflow.
+
+## Stack and architecture
+
+- **Monorepo:** pnpm workspaces + Turborepo.
+- **API/runtime:** Node.js 24, TypeScript, Express 5, Zod.
+- **Frontend/auth:** Next.js App Router, React, Tailwind CSS v4, Clerk Core 3.
+- **Database:** PostgreSQL 17 via Docker Compose, `pg`, `node-pg-migrate`.
+- **Quality/ops:** Vitest, Supertest, Pino, pino-http, Helmet, graceful shutdown.
+- **Planned jobs:** Redis + BullMQ with a scheduler, durable PostgreSQL dispatch/reconciliation and separate worker processes.
+- **Core principles:** PostgreSQL is the durable source of truth; queue jobs may run more than once; database effects must be idempotent; enforce access and plan limits on the server; use versioned migrations, parameterized SQL, bounded work and explicit recovery paths.
+
+## Current progress
+
+### Implemented
+
+- pnpm/Turborepo monorepo and Express API foundation, health endpoints, structured logs, Helmet, JSON body-size limit and graceful HTTP shutdown.
+- Clerk sign-in/session authentication from Next.js to Express.
+- PostgreSQL migrations for `workspaces`, `workspace_members`, `monitors`, and `monitor_checks`.
+- Authenticated workspace creation/listing with transaction boundaries, validation and owner membership.
+- Monitor create/list API with workspace membership checks, request validation and frontend monitor manager. The user reported that frontend workflow works.
+- URL candidate policy and DNS/IP validation modules. Their test/type-check/build run was reported successful after correcting a hostname assertion.
+- `monitor-http-checker.ts` and tests have been drafted and explained.
+
+### Last confirmed verification
+
+- **36 tests passed**, API type checks passed and API production build passed before the HTTP checker was added.
+- The URL-policy and DNS-policy checks were reported working; exact newest combined test count was not provided.
+- **Still required:** run the latest complete tests/type-check/build after adding the HTTP checker, then explicitly verify actual TLS/connection pinning, timeout cancellation, redirect behavior, and real network cases. Do not claim the checker is production-ready until these gates pass.
+
+## URL security — interview notes
+
+Nexus treats submitted URLs as an **SSRF (server-side request forgery) boundary**.
+
+- URL policy allows only HTTP/HTTPS; rejects embedded credentials, IP-literal URLs, local/internal hostname suffixes and non-standard ports; strips URL fragments.
+- DNS policy checks all resolved addresses and rejects empty results or addresses not classified as ordinary public unicast.
+- The checker is designed to connect to a validated IP while preserving the intended hostname for HTTP `Host` and TLS SNI/certificate verification.
+- Redirect targets are revalidated; HTTPS-to-HTTP redirects are rejected; redirect count and overall check time are bounded; unnecessary response-body downloads are avoided.
+- **Caveat:** These are application-layer controls, not proof of complete production security. Verify pinned-IP TLS behavior, cancellation and redirects, and add infrastructure-level egress restrictions before enabling unrestricted outbound checks.
+
+**Interview phrasing:** “I treat monitor URLs as an SSRF boundary. Nexus validates URL structure, checks all resolved addresses, pins connections to validated IPs, and revalidates redirects. I also plan infrastructure egress controls and targeted security tests to protect against bypasses such as DNS rebinding.”
+
+## Multi-region monitoring design — scope added
+
+We will support **two probe regions: India and the USA**. The first proposed AWS locations are Mumbai (`ap-south-1`) and US East/N. Virginia (`us-east-1`); confirm account access, cost and deployment choice before provisioning. AWS lists both as Regions. [AWS Regions](https://docs.aws.amazon.com/global-infrastructure/latest/regions/aws-regions.html)
+
+- Keep one central control plane initially (API, PostgreSQL and Redis), and deploy independent probe workers in India and the USA. These are multi-region **checks**, not active-active multi-region hosting of the entire SaaS.
+- Add a `probe_regions` catalog (stable region code, country code, display name, enabled flag) instead of hard-coding region names throughout the schema.
+- Add `monitor_region_assignments` so each monitor has explicit enabled probe regions. Plan entitlements will limit which assignments a workspace can create.
+- Each check result must reference its `region_id` and scheduled slot. Use a database uniqueness constraint for `(monitor_id, region_id, scheduled_for)` (or equivalent durable run ID) so duplicate delivery does not create duplicate results for one scheduled slot.
+- Use region-specific BullMQ queues or equivalent routing so the US worker never consumes an India-only job. Store durable dispatch intent in PostgreSQL and reconcile/publish pending work after Redis outages.
+- UI should show each region’s latest status and latency separately; a single overall status must not conceal a regional outage.
+- Document the central DB/Redis as remaining dependencies; regional worker deployment alone does not make the control plane highly available.
+
+## Subscription design — scope added
+
+Implement a small, real subscription flow in **Stripe test mode** with server-side entitlements. Live charging, tax/legal readiness and production payment onboarding are outside this sprint.
+
+- Start with two plans (tentative): **Free** supports one region and lower monitor/retention limits; **Pro** enables India + USA and higher limits. Finalize numeric limits before implementing enforcement.
+- Store plan definitions/entitlements and workspace subscription state in PostgreSQL, including Stripe customer/subscription IDs, status and billing-period/cancellation fields needed by the app.
+- Add a webhook-event ledger with a unique provider event ID, so duplicate webhook delivery is idempotent.
+- Checkout redirects alone must never grant paid access. Verify Stripe webhook signatures, process supported events idempotently, persist the subscription state, and enforce features/limits in the API. Stripe documents subscription lifecycle webhook events such as `customer.subscription.created`, `.updated` and `.deleted`. [Stripe event types](https://docs.stripe.com/api/events/retrieve)
+- Use environment variables for Stripe secrets and price IDs. Keep secret values out of source control and logs.
+
+## Delivery plan through 21 November
+
+The target is aggressive but scoped. Complete planned work by 19 November where possible and keep 20–21 November for critical fixes, not new features.
+
+| Dates | Milestone | Exit criteria |
+|---|---|---|
+| **Oct 30** | Verify and harden URL checker | Latest tests, type-check and build pass; validate TLS hostname checks, address pinning, timeout behavior and redirects. No worker makes outbound requests before this gate passes. |
+| **Oct 31–Nov 1** | Region + durable-run schema | Add region catalog/assignments, region-aware check results and durable dispatch/idempotency structure using migrations. Add schema constraints/tests. |
+| **Nov 2–3** | Check persistence + standalone worker | Worker calls checker, writes results and updates current monitor state; bounded concurrency and graceful shutdown. Use controlled test targets. |
+| **Nov 4–5** | Redis + BullMQ | Docker Compose Redis, queue connection lifecycle, region queue routing, retries/backoff, job observability and worker health. |
+| **Nov 6–7** | Scheduler + reconciliation | Publish due checks from durable PostgreSQL records; reconcile pending work when Redis is unavailable; tolerate duplicate job delivery safely. |
+| **Nov 8–9** | Failure drills | Test Redis unavailable/restarted, worker killed mid-check, stalled jobs, duplicate messages, scheduling overlap and backlog recovery. Verify database outcomes are idempotent. |
+| **Nov 10–11** | Monitoring UI | Show latest status, response time, check history, errors and India/USA per-region comparisons with loading/error/empty states. |
+| **Nov 12–13** | Two-region deployment | Deploy the probe process in India and the USA; confirm each job is executed from the declared region and persists correctly. Record that central services remain single-region. |
+| **Nov 14–15** | Subscription schema + enforcement | Add plans, workspace subscription state and webhook event ledger; define and test server-side monitor/interval/region/history limits. |
+| **Nov 16–17** | Stripe test-mode flow | Implement checkout session creation, webhook signature verification, idempotent event processing and subscription status sync. Add customer billing management if time allows. |
+| **Nov 18** | Billing + entitlement integration tests | Prove that payment/subscription state changes access only through verified backend events; verify Free/Pro region and usage limits at API boundaries. |
+| **Nov 19** | Release candidate | CI test/type-check/build, deployed end-to-end demo, security review, logs/health checks, architecture diagram and concise README. No new feature work unless critical. |
+| **Nov 20–21** | Buffer and final demo | Fix critical regressions, rehearse a queue failure/recovery demo, verify setup/deployment instructions and document known limitations. |
+
+## Scope control
+
+**Must ship:** secure checker, region-aware schema and results, durable scheduling/dispatch, Redis/BullMQ, recovery/retry tests, multi-region probes in India and the USA, region-aware UI, Stripe test-mode subscriptions with idempotent webhooks and server-enforced entitlements, CI/deployment/docs.
+
+**Defer if the deadline is threatened:** complex analytics, many notification channels, elaborate billing portal customization, Kubernetes, active-active database/Redis, and polished marketing UI. A reliable end-to-end core takes priority over breadth.
+
+## Working rules
+
+- Never commit `.env` files, Clerk/Stripe secrets, database credentials or session tokens.
+- Never call a feature tested or production-ready until the required verification evidence exists.
+- Prove failure behavior: Redis outages must not permanently lose due checks; repeated delivery must not corrupt check history; webhook retries must not grant duplicate or incorrect entitlements.
+- After each milestone, update this log with **what changed, what was verified, what remains risky, and the next step**.
