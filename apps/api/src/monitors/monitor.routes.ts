@@ -5,6 +5,7 @@ import { parseMonitorUrlCandidate } from "./monitor-url-policy.js";
 import { logger } from "../lib/logger.js";
 import {
   WorkspaceAccessError,
+  InvalidMonitorRegionsError,
   type CreateMonitorInput,
   type ListMonitorsInput,
   type Monitor,
@@ -47,6 +48,16 @@ const createMonitorSchema = z.strictObject({
   intervalSeconds: z.number().int().min(30).max(86400).default(300),
 
   timeoutMs: z.number().int().min(1000).max(60000).default(10000),
+
+  regionCodes: z
+    .array(z.string().trim().min(1).max(50))
+    .min(1, "Select at least one monitoring region")
+    .max(10, "Too many monitoring regions selected")
+    .refine(
+      (codes) => new Set(codes).size === codes.length,
+      "Duplicate monitoring regions are not allowed",
+    )
+    .default(["ap-south-1", "us-east-1"]),
 });
 
 export function createMonitorRouter({
@@ -111,6 +122,17 @@ export function createMonitorRouter({
           error: {
             code: "WORKSPACE_NOT_FOUND",
             message: "Workspace not found",
+          },
+        });
+        return;
+      }
+
+      if (error instanceof InvalidMonitorRegionsError) {
+        res.status(400).json({
+          error: {
+            code: "INVALID_MONITOR_REGIONS",
+            message:
+              "One or more selected monitoring regions are invalid or disabled",
           },
         });
         return;

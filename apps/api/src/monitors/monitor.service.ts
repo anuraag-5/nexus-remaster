@@ -26,6 +26,7 @@ export type CreateMonitorInput = {
   url: string;
   intervalSeconds: number;
   timeoutMs: number;
+  regionCodes: string[];
 };
 
 export type ListMonitorsInput = {
@@ -52,6 +53,13 @@ export class WorkspaceAccessError extends Error {
   constructor() {
     super("Workspace not found or access denied");
     this.name = "WorkspaceAccessError";
+  }
+}
+
+export class InvalidMonitorRegionsError extends Error {
+  constructor() {
+    super("One or more monitoring regions are invalid or disabled");
+    this.name = "InvalidMonitorRegionsError";
   }
 }
 
@@ -91,6 +99,30 @@ async function verifyWorkspaceMembership(
   }
 }
 
+async function verifyMonitorRegions(
+  client: PoolClient,
+  regionCodes: string[],
+): Promise<void> {
+  if (
+    regionCodes.length === 0 ||
+    new Set(regionCodes).size !== regionCodes.length
+  ) {
+    throw new InvalidMonitorRegionsError();
+  }
+
+  const result = await client.query<{ code: string }>(
+    `SELECT code
+     FROM monitor_regions
+     WHERE code = ANY($1::text[])
+       AND is_enabled = TRUE`,
+    [regionCodes],
+  );
+
+  if (result.rows.length !== regionCodes.length) {
+    throw new InvalidMonitorRegionsError();
+  }
+}
+
 export function createMonitorService(pool: Pool) {
   async function createMonitor(input: CreateMonitorInput): Promise<Monitor> {
     const client = await pool.connect();
@@ -101,6 +133,7 @@ export function createMonitorService(pool: Pool) {
       transactionStarted = true;
 
       await verifyWorkspaceMembership(client, input.workspaceId, input.userId);
+      await verifyMonitorRegions(client, input.regionCodes);
 
       const result = await client.query<MonitorRow>(
         `INSERT INTO monitors (
@@ -138,6 +171,18 @@ export function createMonitorService(pool: Pool) {
       if (!row) {
         throw new Error("Monitor creation returned no row");
       }
+
+      await client.query(
+        `INSERT INTO monitor_probes (
+     monitor_id,
+     region_code
+   )
+   SELECT
+     $1,
+     selected.region_code
+   FROM UNNEST($2::text[]) AS selected(region_code)`, //UNNEST splits array into individual rows.
+        [row.id, input.regionCodes],
+      );
 
       await client.query("COMMIT");
       transactionStarted = false;

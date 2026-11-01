@@ -8,20 +8,22 @@ import { createApp } from "../src/app.js";
 import { describe, expect, it } from "vitest";
 import type { RequestHandler } from "express";
 import { WorkspaceAccessError } from "../src/monitors/monitor.service.js";
-import { CreateMonitorInput, ListMonitorsInput, Monitor } from "../src/monitors/monitor.service.js";
+import {
+  CreateMonitorInput,
+  ListMonitorsInput,
+  Monitor,
+} from "../src/monitors/monitor.service.js";
 
 type TestAppOptions = {
   checkDatabase?: () => Promise<void>;
   userId?: string | null;
   createWorkspace?: (input: CreateWorkspaceInput) => Promise<Workspace>;
-  listWorkspaces? : (userId: string) => Promise<WorkspaceSummary[]>;
-  createMonitor? : (input: CreateMonitorInput) => Promise<Monitor>;
-  listMonitors? : (input: ListMonitorsInput) => Promise<Monitor[]>;
+  listWorkspaces?: (userId: string) => Promise<WorkspaceSummary[]>;
+  createMonitor?: (input: CreateMonitorInput) => Promise<Monitor>;
+  listMonitors?: (input: ListMonitorsInput) => Promise<Monitor[]>;
 };
 
-const makeTestMonitor = (
-  input: CreateMonitorInput,
-): Monitor => ({
+const makeTestMonitor = (input: CreateMonitorInput): Monitor => ({
   id: "monitor_test_123",
   workspaceId: input.workspaceId,
   name: input.name,
@@ -42,7 +44,7 @@ function createTestApp({
   createWorkspace,
   listWorkspaces,
   createMonitor,
-  listMonitors
+  listMonitors,
 }: TestAppOptions = {}) {
   const authMiddleware: RequestHandler = (_req, _res, next) => {
     next();
@@ -248,8 +250,7 @@ describe("GET /api/v1/workspaces", () => {
   it("requires an authenticated user", async () => {
     const app = createTestApp();
 
-    const response = await request(app)
-      .get("/api/v1/workspaces");
+    const response = await request(app).get("/api/v1/workspaces");
 
     expect(response.status).toBe(401);
     expect(response.body.error.code).toBe("UNAUTHENTICATED");
@@ -275,8 +276,7 @@ describe("GET /api/v1/workspaces", () => {
       },
     });
 
-    const response = await request(app)
-      .get("/api/v1/workspaces");
+    const response = await request(app).get("/api/v1/workspaces");
 
     expect(response.status).toBe(200);
     expect(receivedUserId).toBe("user_test_123");
@@ -296,14 +296,12 @@ describe("GET /api/v1/workspaces", () => {
       userId: "user_without_workspaces",
     });
 
-    const response = await request(app)
-      .get("/api/v1/workspaces");
+    const response = await request(app).get("/api/v1/workspaces");
 
     expect(response.status).toBe(200);
     expect(response.body.data).toEqual([]);
   });
 });
-
 
 const workspaceId = "b16c2fa2-ee2b-4f0e-a545-1ccd8e46f85c";
 
@@ -356,6 +354,7 @@ describe("POST /api/v1/workspaces/:workspaceId/monitors", () => {
       url: "https://example.com/health",
       intervalSeconds: 300,
       timeoutMs: 10000,
+      regionCodes: ["ap-south-1", "us-east-1"],
     });
 
     expect(response.body.data).toMatchObject({
@@ -431,14 +430,84 @@ describe("POST /api/v1/workspaces/:workspaceId/monitors", () => {
     expect(response.status).toBe(404);
     expect(response.body.error.code).toBe("WORKSPACE_NOT_FOUND");
   });
+
+  it("rejects duplicate monitoring regions", async () => {
+    let serviceCalled = false;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        serviceCalled = true;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+        regionCodes: ["ap-south-1", "ap-south-1"],
+      });
+
+    expect(response.status).toBe(400);
+    expect(serviceCalled).toBe(false);
+  });
+
+  it("rejects an empty monitoring region selection", async () => {
+    let serviceCalled = false;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        serviceCalled = true;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+        regionCodes: [],
+      });
+
+    expect(response.status).toBe(400);
+    expect(serviceCalled).toBe(false);
+  });
+
+  it("accepts a single monitoring region", async () => {
+    let receivedInput: CreateMonitorInput | undefined;
+
+    const app = createTestApp({
+      userId: "user_test_123",
+      createMonitor: async (input) => {
+        receivedInput = input;
+        return makeTestMonitor(input);
+      },
+    });
+
+    const response = await request(app)
+      .post(`/api/v1/workspaces/${workspaceId}/monitors`)
+      .send({
+        name: "Homepage",
+        url: "https://example.com",
+        regionCodes: ["ap-south-1"],
+      });
+
+    expect(response.status).toBe(201);
+    expect(receivedInput?.regionCodes).toEqual(["ap-south-1"]);
+  });
 });
 
 describe("GET /api/v1/workspaces/:workspaceId/monitors", () => {
   it("requires an authenticated user", async () => {
     const app = createTestApp();
 
-    const response = await request(app)
-      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+    const response = await request(app).get(
+      `/api/v1/workspaces/${workspaceId}/monitors`,
+    );
 
     expect(response.status).toBe(401);
   });
@@ -470,8 +539,9 @@ describe("GET /api/v1/workspaces/:workspaceId/monitors", () => {
       },
     });
 
-    const response = await request(app)
-      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+    const response = await request(app).get(
+      `/api/v1/workspaces/${workspaceId}/monitors`,
+    );
 
     expect(response.status).toBe(200);
 
@@ -497,8 +567,9 @@ describe("GET /api/v1/workspaces/:workspaceId/monitors", () => {
       },
     });
 
-    const response = await request(app)
-      .get(`/api/v1/workspaces/${workspaceId}/monitors`);
+    const response = await request(app).get(
+      `/api/v1/workspaces/${workspaceId}/monitors`,
+    );
 
     expect(response.status).toBe(404);
     expect(response.body.error.code).toBe("WORKSPACE_NOT_FOUND");
