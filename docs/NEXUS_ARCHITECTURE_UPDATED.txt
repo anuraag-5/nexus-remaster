@@ -1,7 +1,8 @@
 NEXUS REMASTER — END-TO-END ARCHITECTURE
 Architecture record / project source of truth
-Version: 1.0
-Recorded: 2 November 2026
+Version: 1.1
+Recorded: 7 November 2026
+Last verified milestone: execution/outbox schema + PostgreSQL invariants
 Target MVP: 21 November 2026 (feature freeze target: 19 November; buffer: 20–23 November)
 
 ======================================================================
@@ -309,7 +310,7 @@ Workers execute checks; the database records durable outcomes.
 5. DATA MODEL — CURRENT FACTS AND PLANNED ENTITIES
 ======================================================================
 
-5.1 Implemented schema (as of 2 November 2026, based on project notes)
+5.1 Implemented schema (verified schema/migration status as of 7 November 2026)
 
 workspaces
   - UUID primary key.
@@ -346,9 +347,60 @@ monitor_probes
   - partial due-work index on (region_code, next_check_at) for enabled rows.
 
 monitor_checks
-  - Historical check records now reference a regional probe_id.
-  - Exact full column definitions and constraints must be re-read from
-    the applied migration before designing dependent schema.
+  - UUID primary key; probe_id is NOT NULL and references monitor_probes
+    with ON DELETE CASCADE.
+  - status is up/down; checked_at and completed_at are timestamps.
+  - response_time_ms is non-negative; http_status_code is nullable and
+    constrained to 100..599; error_code/error_message are bounded nullable
+    fields.
+  - execution_id was added nullable by migration 4. NULL is intentional
+    for legacy checks; newly accepted execution-backed results use it.
+  - A partial unique index on execution_id WHERE execution_id IS NOT NULL
+    allows at most one accepted check per logical execution while
+    preserving multiple legacy rows with NULL execution_id.
+  - A composite, deferred FK (execution_id, probe_id) references
+    monitor_executions(id, probe_id), preventing a check from linking an
+    execution belonging to a different probe. ON DELETE NO ACTION is
+    DEFERRABLE INITIALLY DEFERRED so execution history cannot be deleted
+    while a linked check remains.
+
+monitor_executions (migration 4: 20261104220000_add_execution_outbox)
+  - UUID primary key; probe_id references monitor_probes ON DELETE CASCADE.
+  - scheduled_for identifies the intended schedule slot.
+  - status CHECK: pending, queued, running, completed, failed, cancelled.
+  - attempt_count >= 0; max_attempts >= 1; available_at defaults to now().
+  - lease_owner and lease_expires_at represent active worker ownership.
+  - fencing_token is a non-negative BIGINT, default 0.
+  - started_at, completed_at, last_error_code, created_at, updated_at.
+  - UNIQUE(probe_id, scheduled_for) prevents duplicate logical executions
+    for a probe and schedule slot.
+  - UNIQUE(id, probe_id) supports the composite check FK.
+  - CHECK constraints require a nonblank owner + expiry only while status
+    is running, and require completed_at exactly for terminal states
+    (completed, failed, cancelled).
+  - Partial indexes support pending/queued availability, expired running
+    leases and per-probe scheduled history.
+
+outbox_events (migration 4: 20261104220000_add_execution_outbox)
+  - UUID primary key; execution_id references monitor_executions
+    ON DELETE CASCADE.
+  - event_type, status (pending, publishing, published), available_at,
+    publish_attempts, locked_by, lease_expires_at, published_at,
+    last_error, created_at, updated_at.
+  - CHECK constraints require a nonblank publisher owner + lease expiry
+    only while publishing, and published_at exactly while published.
+  - Multiple outbox rows per execution are intentionally allowed. A new
+    dispatch event can recover a stuck/ambiguous logical execution without
+    inventing a second logical execution.
+  - Partial indexes support pending publication and expired publishing
+    leases; a separate execution_id index supports lookup.
+
+Migration 4 application evidence:
+  - Migration 20261104220000_add_execution_outbox was successfully applied
+    to nexus_test and appears in its pgmigrations table (four migrations).
+  - The user inspected the resulting tables, constraints, foreign keys and
+    indexes. Do not infer that the production/development nexus database
+    has also been migrated; only nexus_test application is confirmed here.
 
 Historical check migration note:
   - Existing historical checks were assigned to the India probe by
@@ -356,29 +408,71 @@ Historical check migration note:
   - Do not present those historical records as verified India-origin
     measurements.
 
-5.2 Planned data concepts (not yet implemented / exact schema OPEN)
+5.2 Execution/outbox design decisions now finalized; runtime is not yet built
 
 Logical execution:
-  - One intended scheduled check for one probe at one scheduled time.
-  - Has a deterministic identity/uniqueness rule.
-  - Owns the result and terminal outcome of that logical check.
-  - Delivery attempts are children/metadata of this logical execution,
-    not new monitoring samples.
+  - One intended scheduled check for one regional probe and one
+    scheduled_for slot.
+  - UNIQUE(probe_id, scheduled_for) is the database-level identity guard.
+  - A logical execution is distinct from BullMQ job deliveries and retry
+    attempts. Its accepted monitor_checks row is unique by execution_id.
+  - Execution statuses: pending, queued, running, completed, failed,
+    cancelled. completed means an observation was persisted (which may be
+    an up or down result); failed means the system could not produce or
+    persist a valid observation within policy, not that the target is down.
+  - attempt_count/max_attempts and available_at record bounded attempt
+    policy/state; exact retry ownership and numerical policy remain to be
+    implemented and tested.
+  - Worker ownership is represented by lease_owner, lease_expires_at and
+    monotonically increasing fencing_token on the execution.
+  - A worker must conditionally finalize only while it still owns the
+    current fencing token. Result insertion and execution completion must
+    be in one transaction; stale workers must not insert accepted results.
 
 Outbox dispatch record:
-  - Durable intent to publish a logical execution to its regional queue.
-  - Links to execution and region.
-  - Needs a retryable publication lifecycle, claim/lease semantics,
-    timestamps and bounded error metadata.
-  - Exact states and fields are not finalized.
+  - One durable dispatch intent, separate from logical execution identity.
+  - Statuses: pending, publishing, published.
+  - Publisher ownership uses locked_by + lease_expires_at; publication
+    attempts and availability are durable in PostgreSQL.
+  - No uniqueness constraint on execution_id: multiple dispatch events
+    are intentionally supported for recovery after ambiguous publication
+    or a stuck execution.
+  - published means queue publication was acknowledged; it does NOT mean
+    a worker completed the check.
 
 Attempt/fencing information:
-  - Needed to stop an old or slow worker from overwriting a newer accepted
-    outcome.
-  - Must define ownership/lease or fencing-token semantics before coding.
-  - Do not add speculative claim_token/lease_expires_at/attempt_count
-    columns to monitor_probes as a shortcut. That earlier proposal was
-    explicitly rejected as premature.
+  - Fencing token increments on each successful worker claim.
+  - If worker A owns token 1, its lease expires, and worker B claims token
+    2, worker A must be unable to persist after B owns the execution.
+  - BullMQ retries and recovery dispatches retain the same logical
+    execution_id. They must not create duplicate monitoring samples.
+  - Do not add execution lease/attempt fields to monitor_probes; execution
+    ownership belongs to monitor_executions.
+
+Approved execution transition model (runtime guards still to implement):
+  pending -> queued       publisher records successful queue publication;
+  queued -> running       worker successfully claims execution;
+  running -> completed    accepted result + completion committed atomically;
+  running -> queued       retryable failure, retry scheduled;
+  running -> failed       attempts/deadline exhausted or terminal failure;
+  pending/queued -> cancelled when monitor/probe work is disabled or invalid.
+
+Important race: a worker may receive a job and claim it before the publisher
+commits its `queued` acknowledgement. Worker claim logic must tolerate this
+ordering; publisher acknowledgement must not overwrite a later `running` or
+terminal state. `completed` means a result was persisted, regardless of up or
+down status. `failed` means no valid observation could be produced/persisted
+within policy; it is not a website-down measurement.
+
+Approved outbox transition model:
+  pending -> publishing   publisher claims with owner + finite lease;
+  publishing -> published queue accepts the job and publisher records ack;
+  publishing -> pending   transient publish failure;
+  expired publishing -> pending recovery reclaims expired publisher lease.
+
+Publication acknowledgement is not execution completion. If Redis accepts a
+job but the publisher fails before recording the acknowledgement, a later
+publish may duplicate delivery. This is expected under at-least-once delivery.
 
 5.3 Schema migration rules
   - Never edit an already-applied migration.
@@ -393,8 +487,30 @@ Attempt/fencing information:
 6. END-TO-END SCHEDULING AND EXECUTION LIFECYCLE
 ======================================================================
 
-The following is the intended logical flow. Exact SQL and state names are
-OPEN until the outbox design milestone is completed.
+The following is the approved lifecycle and schema-level state model.
+Runtime scheduler, publisher and worker code is still PLANNED, not
+implemented. State names and core constraints are defined by migration 4.
+
+Transaction boundaries (approved):
+  A. Scheduler transaction:
+     BEGIN; select/lock a bounded set of due regional probes; create logical
+     executions; create outbox dispatch intents; advance next_check_at;
+     COMMIT. No Redis or HTTP call inside this transaction.
+
+  B. Publisher flow:
+     Claim eligible outbox rows and establish finite leases in a short DB
+     transaction; COMMIT. Publish to the regional BullMQ queue outside the
+     transaction. Then use a short DB transaction to mark successful
+     publication / update dispatch state; COMMIT. If Redis accepted the job
+     but the DB acknowledgement fails, duplicate publication is expected.
+
+  C. Worker flow:
+     Short transaction claims execution, increments fencing_token, records
+     lease owner/expiry and commits. Perform DNS/HTTP/TLS check outside any
+     DB transaction. Then begin a short transaction, conditionally verify
+     current fencing token/ownership, insert the unique accepted check,
+     update execution terminal/retry state and regional probe status, then
+     commit. A stale token must not insert an accepted result.
 
 Step 1 — Discover due work
   Scheduler selects enabled probes whose next_check_at is due, while
@@ -435,23 +551,32 @@ Step 8 — Persist result
   timestamps, and commits.
 
 Step 9 — Retry or terminal outcome
-  Transient failures may be retried with exponential backoff and jitter
-  within a bounded attempt/time policy. A retry is another attempt for the
-  same logical execution. Permanent policy/configuration errors should not
-  be retried indefinitely. Exact classification and terminal rules remain
-  OPEN.
+  - Transient failures use delayed retry with exponential backoff and
+    jitter, within max_attempts and an overall execution deadline.
+  - Retries are additional attempts for the SAME execution_id.
+  - Permanent policy/configuration failures do not retry indefinitely.
+  - BullMQ handles delivery/retry timing; PostgreSQL remains authoritative
+    for logical execution state and accepted result.
+  - A persistence failure must not be acknowledged as successful work.
+  - Exact classification, delay values and deadline values are not yet
+    implemented or load-validated.
 
 Step 10 — Reconcile
   Reconciler repairs durable work that did not progress because of process
-  failure, queue outage, expired claims or inconsistent state.
+  failure, queue outage, expired claims or inconsistent state. It reuses
+  the same logical execution identity where appropriate and creates a new
+  outbox dispatch event when redispatch is needed; it must not blindly
+  create a new logical execution for every recovery.
 
-Scheduling policy OPEN:
-  - Whether next_check_at is based on scheduled cadence or completion time.
-  - How missed intervals are handled after a long outage.
-  - Whether missed slots are skipped or coalesced.
-  - How interval changes affect already-created executions.
-  These must be decided explicitly; do not accidentally create a large
-  catch-up storm after downtime.
+Approved scheduling policy:
+  - Coalesce missed intervals. After scheduler downtime, create one
+    execution for the latest due slot rather than enqueueing every missed
+    interval.
+  - Advance next_check_at to the next future interval.
+  - scheduled_for is the intended slot and remains distinct from started_at
+    and completed_at.
+  - Detailed interval-change behavior and generation/version semantics
+    remain to be specified before scheduler implementation.
 
 ======================================================================
 7. RELIABILITY, FAILURE MODES AND GUARANTEES
@@ -730,19 +855,50 @@ Test layers:
   8. Security tests: SSRF, redirect SSRF, DNS rebinding, IP ranges, TLS
      hostname validation, timeout cancellation and egress controls.
 
-Current recorded verification as of 2 November 2026:
-  - 64 API tests passed across 4 test files.
+Current recorded verification as of 7 November 2026:
+  - 80 API tests passed across 5 test files in the complete API suite.
   - API production TypeScript checks passed.
   - API test TypeScript checks passed.
   - API production build passed.
-  - Five real PostgreSQL integration tests passed for monitor/probe
-    creation, region validation, workspace authorization and rollback.
-  - Test database nexus_test has migrations through region-aware monitoring.
+  - Five monitor/probe PostgreSQL integration tests passed.
+  - Sixteen execution/outbox PostgreSQL invariant integration tests passed
+    against nexus_test.
+  - Migration 4 (20261104220000_add_execution_outbox) is applied to
+    nexus_test; four migration records were confirmed there.
+  - Database invariant tests cover execution uniqueness, lease and
+    timestamp checks, outbox lease/publication checks, multiple dispatches
+    per execution, result uniqueness, composite probe/execution integrity,
+    legacy NULL execution IDs, FK rejection and deletion behavior.
   - HTTP checker unit tests exist, but checker security/network hardening
     remains open.
-  - No Redis/BullMQ/outbox/scheduler/worker implementation is yet recorded.
+  - Scheduler, publisher, Redis/BullMQ runtime, regional workers and
+    reconciler are not implemented/verified yet.
   - No regional deployment has been verified.
   - No production readiness claim is justified.
+
+PostgreSQL invariant coverage verified on 7 November 2026 (16 tests in
+`monitor-execution.integration.test.ts`):
+  1. Unique probe + scheduled_for logical execution identity.
+  2. Running execution requires lease owner and expiry.
+  3. Terminal execution requires completed_at.
+  4. Non-running execution rejects lease metadata.
+  5. Non-terminal execution rejects completed_at.
+  6. Publishing outbox event requires publisher owner and expiry.
+  7. Non-publishing outbox event rejects lease metadata.
+  8. Published outbox event requires published_at.
+  9. Multiple dispatch events may reference one execution.
+ 10. One accepted result per execution.
+ 11. Composite FK rejects execution/probe mismatch.
+ 12. Legacy check with NULL execution_id remains valid.
+ 13. Execution deletion is rejected while linked check history exists.
+ 14. Outbox event cannot reference a nonexistent execution.
+ 15. Deleting an execution cascades its outbox events.
+ 16. Deleting a probe cascades through its checks, executions and outbox.
+
+These tests validate PostgreSQL constraints and referential behavior only.
+They do NOT yet test concurrent scheduler behavior, publisher/Redis
+failure windows, worker fencing under races, retry timing, or runtime
+reconciliation.
 
 Minimum release evidence:
   - Full test/type/build checks pass in CI.
@@ -804,71 +960,48 @@ Reason: execution ownership, outbox publication and worker fencing must be
 designed as one coherent state model first.
 
 ======================================================================
-15. OPEN DESIGN QUESTIONS — MUST RESOLVE BEFORE OUTBOX MIGRATION
+15. RESOLVED DESIGN DECISIONS AND REMAINING OPEN QUESTIONS
 ======================================================================
 
-These are intentionally not silently decided by this document:
+Resolved before migration 4 (approved architecture; runtime implementation
+and failure behavior still require tests):
+  A. Logical execution identity is UNIQUE(probe_id, scheduled_for).
+  B. Execution states are pending, queued, running, completed, failed,
+     cancelled. Terminal timestamps and running leases are DB constrained.
+  C. Outbox states are pending, publishing, published. Publisher leases and
+     published timestamps are DB constrained.
+  D. Worker ownership uses lease_owner, lease_expires_at and a monotonically
+     increasing fencing_token on monitor_executions.
+  E. One accepted monitor_checks row per execution is enforced by a partial
+     unique index; a composite deferred FK enforces matching probe identity.
+  F. Legacy monitor_checks rows may retain execution_id NULL.
+  G. Multiple outbox events per execution are allowed for recovery.
+  H. Missed intervals are coalesced to the latest due slot; next_check_at
+     advances to the next future interval.
+  I. BullMQ delivery is at-least-once; database effects are idempotent.
+  J. No transaction spans an outbound HTTP request.
 
-A. Logical execution identity:
-   - Which fields define one scheduled slot?
-   - Is identity based on probe_id + scheduled_for timestamp, plus a
-     generation/version to handle interval/configuration changes?
-   - What uniqueness constraint prevents concurrent scheduler duplicates?
+Still OPEN before or during runtime implementation:
+  1. Exact scheduler SQL/locking strategy and how monitor/probe/region
+     disable or configuration changes invalidate due work.
+  2. Queue payload schema/version and whether execution configuration is
+     loaded live or stored as an immutable snapshot.
+  3. Retryable/permanent error taxonomy, numeric backoff/jitter values,
+     max attempts and total execution deadline.
+  4. Reconciler scan rules, repair cadence, redispatch policy and safeguards
+     against repair storms.
+  5. Global concurrency reservation/lease mechanism across regions.
+  6. Regional throughput and globally coordinated per-target key/rate
+     policy; exact thresholds require deployment/load evidence.
+  7. Behavior for monitor interval/region changes when executions already
+     exist, including whether a schedule generation is needed.
+  8. Numerical resource limits: DB pools, scheduler/publisher batches,
+     queue depth/age thresholds, worker concurrency and HTTP budgets.
+  9. Permanent outbox publication failure and operator intervention policy.
 
-B. Execution state machine:
-   - Which states are required (e.g. scheduled, queued, running,
-     succeeded/failed/terminal/expired)?
-   - Which transitions are legal, and which actor may perform each?
-   - How are cancellation/disabled monitor changes handled?
-
-C. Outbox state machine:
-   - Pending -> claimed/publishing -> published?
-   - How are expired claims recovered?
-   - What is the policy for permanent publication failures?
-   - Are publish attempts stored on the outbox row or in a separate table?
-
-D. Worker ownership/fencing:
-   - Is there a lease per execution?
-   - How is a monotonically increasing fencing token created?
-   - How does a worker prove it still owns the right to finalize?
-   - How are late responses from stale attempts discarded?
-
-E. Retry policy:
-   - Which errors are transient/permanent?
-   - How many attempts and what total deadline?
-   - Does BullMQ own retry timing, while PostgreSQL records attempt state?
-   - How does reconciliation interact with BullMQ retries?
-
-F. Scheduling semantics:
-   - Schedule from due time or completion time?
-   - Skip/coalesce missed intervals after downtime?
-   - What happens when monitor interval or regions change?
-   - How are duplicate scheduler runs serialized?
-
-G. Result model:
-   - Does monitor_checks represent one logical execution result, or one
-     row per network attempt plus a separate accepted final result?
-   - How are failed attempts represented without distorting uptime?
-   - What exact uniqueness and foreign-key rules are needed?
-
-H. Queue payload:
-   - Minimum identifiers and schema version.
-   - Whether config is loaded live or captured as an immutable snapshot.
-   - How stale jobs are detected.
-
-I. Reconciliation:
-   - Which durable states are scanned?
-   - How are missing jobs re-published?
-   - How are stuck executions expired/retried?
-   - How is repair bounded to avoid a thundering herd?
-
-J. Backpressure and target protection:
-   - Which metrics/thresholds trigger pause or slowdown?
-   - Is per-target coordination global across regions?
-   - What is the normalized target key and fairness policy?
-
-No migration should be written until these questions are resolved sufficiently
-to produce a coherent schema and transition design.
+The existence of migration 4 and passing constraint tests does not prove
+these runtime behaviors. Implement and test them in their respective
+milestones; do not silently expand the approved architecture.
 
 ======================================================================
 16. IMPLEMENTATION STATUS SNAPSHOT
@@ -888,18 +1021,25 @@ IMPLEMENTED / VERIFIED:
   - URL policy, DNS/IP policy and HTTP checker implementation with unit
     tests; security hardening remains incomplete.
   - Five PostgreSQL integration tests for monitor/probe behavior.
-  - 64 API tests passed across 4 files.
-  - API type checks and production build passed.
+  - Migration 4 execution/outbox schema applied and inspected in nexus_test.
+  - Sixteen PostgreSQL integration tests for execution/outbox invariants.
+  - 80 API tests passed across 5 files (full suite, 7 November 2026).
+  - API production + test TypeScript checks passed (7 November 2026).
+  - API production build passed (7 November 2026).
 
-NOT YET IMPLEMENTED (based on recorded project state):
-  - Transactional outbox and logical execution schema.
+IMPLEMENTED SCHEMA / RUNTIME NOT YET IMPLEMENTED:
+  - Migration 4 execution/outbox tables, constraints and indexes exist in
+    nexus_test; this does not confirm migration 4 is applied to nexus.
+
+NOT YET IMPLEMENTED / NOT VERIFIED:
+  - Scheduler execution loop and concurrent due-probe claiming.
   - Reliable outbox publisher.
-  - Redis Docker service and BullMQ.
-  - India/USA queues and regional worker processes.
-  - Scheduler execution loop.
-  - Worker result persistence.
-  - Retry/stalled recovery/reconciliation.
-  - Queue-aware backpressure, regional and per-target limits.
+  - Redis Docker service and BullMQ runtime integration.
+  - India/USA queues and regional worker processes/deployments.
+  - Worker result persistence and runtime fencing enforcement.
+  - Retry/stalled-job recovery and reconciliation runtime.
+  - Queue-aware backpressure, global concurrency, regional and per-target
+    rate-limit implementations.
   - Regional deployment proof.
   - Incidents/notifications.
   - Stripe billing/entitlements.
@@ -909,30 +1049,32 @@ NOT YET IMPLEMENTED (based on recorded project state):
 17. NEXT IMPLEMENTATION MILESTONE
 ======================================================================
 
-Next milestone: design and review the durable dispatch state machine BEFORE
-writing migrations.
+Next milestone: implement and verify the scheduler against the approved
+execution/outbox schema. Do not redesign the architecture while doing so.
 
-Required inputs to inspect:
-  - Full source of the region-aware monitoring migration.
-  - Full source of the monitor_checks migration.
-  - Current monitor_probes and monitor_checks schema from nexus and
-    nexus_test.
-  - Current monitor service and test setup.
-  - Existing API/worker package layout and scripts.
+Before coding, inspect the current repository source, migration 4, monitor
+service, schema and package layout. Then produce a focused scheduler design
+covering:
+  1. Bounded due-probe selection and safe concurrency across scheduler
+     instances (for example, row-locking/skip-locked semantics where
+     appropriate after inspecting current indexes and SQL).
+  2. Monitor/probe/region enabled-state checks.
+  3. Coalesced missed-interval calculation and next_check_at advancement.
+  4. Atomic creation of monitor_executions + outbox_events + schedule
+     advancement in one PostgreSQL transaction.
+  5. Duplicate scheduler invocation behavior under UNIQUE(probe_id,
+     scheduled_for).
+  6. Rollback behavior if any insert/update fails.
+  7. Publisher/worker race awareness in state transition guards.
+  8. Metrics/log correlation fields and bounded batch behavior.
+  9. PostgreSQL integration tests for due selection, concurrency, coalescing,
+     disabled entities, uniqueness and transaction atomicity.
 
-Deliverables for the design milestone:
-  1. Entity relationship model for probe, logical execution, outbox and
-     check result.
-  2. State-transition tables for execution and outbox.
-  3. Transaction boundaries for scheduler, publisher and worker.
-  4. Duplicate/concurrent scheduler and ambiguous publisher failure analysis.
-  5. Worker lease/fencing design.
-  6. Retry ownership and reconciliation rules.
-  7. Migration plan with indexes, uniqueness, constraints and rollback.
-  8. Integration tests mapped to each failure boundary.
-
-Only after reviewing those inputs and agreeing on the design should the
-first outbox migration be authored and applied.
+Then implement the scheduler module and run focused tests, full API tests,
+type checks and build. Only after scheduler correctness should publisher
+implementation begin. The approved architecture and migration 4 are the
+baseline; do not write another schema migration unless inspection reveals
+an actual requirement and the user approves the change.
 
 ======================================================================
 18. CHANGE CONTROL / WORKING AGREEMENT

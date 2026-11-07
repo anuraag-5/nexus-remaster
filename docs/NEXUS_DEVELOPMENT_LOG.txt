@@ -1,0 +1,62 @@
+# Nexus Remaster — Development Log
+
+**Updated:** 7 November 2026  
+**MVP target:** 21 November 2026  
+**Architecture reference:** `NEXUS_ARCHITECTURE_UPDATED.txt`
+
+## Goal
+Build a regional website-monitoring SaaS with secure HTTP checks, durable scheduling, Redis/BullMQ workers, reliable result persistence, recovery, observability and a demonstrable deployment.
+
+## Current status
+
+### Implemented
+- pnpm/Turborepo monorepo; Node.js 24, TypeScript, Express 5 API and Next.js frontend with Clerk.
+- PostgreSQL 17, Docker Compose and `node-pg-migrate`.
+- Workspace and monitor APIs with validation and membership authorization.
+- Regional monitoring schema: `monitor_regions`, `monitor_probes` and probe-linked `monitor_checks`.
+- URL policy, DNS/IP policy and HTTP checker implementation with unit tests. Security hardening remains open.
+- Migration 4: `monitor_executions`, `outbox_events`, execution-linked checks, constraints, foreign keys and indexes. Applied to `nexus_test`.
+- 16 PostgreSQL integration tests for execution/outbox invariants.
+
+### Latest verification — 7 November 2026
+- **80 API tests passed across 5 test files.**
+- API production and test TypeScript checks passed.
+- API production build passed.
+- Migration 4 and its schema were verified in `nexus_test` (four migrations recorded).
+- Application of migration 4 to the separate `nexus` database is not yet confirmed.
+
+The 16 new database tests cover execution uniqueness, lease/timestamp constraints, outbox relationships, multiple dispatch events, result idempotency, composite foreign-key integrity, legacy checks and deletion behavior. They verify PostgreSQL constraints—not scheduler, Redis, worker or recovery runtime behavior.
+
+## Agreed architecture
+**PostgreSQL → Scheduler → Transactional Outbox → Reliable Publisher → Redis/BullMQ regional queues → Regional Workers → PostgreSQL**, with a reconciler repairing missing or stuck work.
+
+Key guarantees and decisions:
+- PostgreSQL is the durable source of truth; Redis/BullMQ is delivery infrastructure.
+- Separate India (`ap-south-1`) and USA (`us-east-1`) queues/workers.
+- At-least-once delivery with idempotent database effects; no exactly-once claim.
+- Logical scheduled executions are distinct from queue delivery/retry attempts.
+- Scheduler persists execution + outbox intent atomically and does not perform HTTP checks.
+- No database transaction remains open during an external HTTP request.
+- Bound concurrency, database pools, batches, regional throughput and per-target request rates.
+- Coalesce missed schedule intervals rather than enqueueing every obsolete interval.
+
+See the architecture document for full state machines, schema details, transaction boundaries, failure analysis, security and design decisions. Do not change approved architecture without review and explicit agreement.
+
+## Next milestone: Scheduler
+Inspect current source and implement bounded, concurrency-safe due-probe scheduling. The scheduler must respect monitor/probe/region enabled state and, in one transaction, create the logical execution, create its outbox event and advance `next_check_at`. Add tests for concurrent schedulers, duplicate slots, missed-interval coalescing, disabled entities and rollback.
+
+## Remaining work
+1. Scheduler and its PostgreSQL integration/failure tests.
+2. Reliable outbox publisher with claims, leases, bounded batches and retry.
+3. Redis/BullMQ infrastructure, versioned jobs and regional queues.
+4. Regional workers, secure checker integration, result persistence and fencing.
+5. Retry/backoff, reconciliation, backpressure, global/regional/per-target limits.
+6. Security hardening, real-network tests, load/failure drills and regional deployment proof.
+7. Dashboard regional history/status, incidents, entitlements/billing, CI and demo documentation.
+
+## Working rules
+- Inspect source before proposing edits; use migrations for schema changes.
+- Never rewrite an applied migration or silently change architecture.
+- Never commit secrets or ask for `.env` contents.
+- Record implemented, tested and deployed states separately.
+- Do not call the system production-ready without the required reliability, security and operational evidence.
