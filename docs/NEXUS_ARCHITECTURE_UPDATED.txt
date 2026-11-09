@@ -1,7 +1,7 @@
 NEXUS REMASTER — END-TO-END ARCHITECTURE
 Architecture record / project source of truth
-Version: 1.1
-Recorded: 7 November 2026
+Version: 1.2
+Recorded: 9 November 2026
 Last verified milestone: execution/outbox schema + PostgreSQL invariants
 Target MVP: 21 November 2026 (feature freeze target: 19 November; buffer: 20–23 November)
 
@@ -48,8 +48,10 @@ MVP target capabilities:
   - Independent regional probes from India and the USA.
   - Durable scheduling and dispatch.
   - Redis + BullMQ for regional job delivery and worker coordination.
-  - Separate regional worker deployments that actually execute checks
-    from their respective regions.
+  - One generic, region-configurable worker implementation deployed in
+    each enabled AWS region; each deployment selects its region through
+    validated environment configuration. No region-specific worker source
+    files are created.
   - Durable check history and per-region status/latency.
   - Recovery from duplicate delivery, process crashes, Redis outages,
     and temporary database pressure.
@@ -161,10 +163,11 @@ inflate uptime/availability statistics.
   ap-south-1               us-east-1
     |                         |
     v                         v
-  India worker              USA worker
+  Generic worker deployment in each region
+  (same code/image; WORKER_REGION_CODE differs per deployment)
     |                         |
     | secure HTTP check      | secure HTTP check
-    | from India             | from USA
+    | from configured region | from configured region
     |                         |
     +------------+------------+
                  |
@@ -270,9 +273,19 @@ Workers execute checks; the database records durable outcomes.
   - Redis loss must not erase the durable intent in PostgreSQL.
 
 4.8 Regional workers
-  - Separate process entry points/deployments for India and USA.
-  - Each worker consumes only its assigned regional queue.
-  - Verify the job's region matches the worker's configured region.
+  - There is one generic regional-worker implementation and one worker
+    entry point, not separate india.worker.ts / usa.worker.ts files.
+  - The same worker code and deployable image are deployed independently
+    into every enabled AWS region.
+  - Each deployment receives its region through an environment variable,
+    e.g. WORKER_REGION_CODE=ap-south-1 or WORKER_REGION_CODE=us-east-1.
+  - Validate WORKER_REGION_CODE at startup against an explicit allow-list
+    / supported region configuration; fail startup for missing or unknown
+    values. Do not accept arbitrary region values from job payloads.
+  - Derive the queue name from the validated region code using one shared
+    queue-name function/convention (e.g. nexus-checks-${regionCode}).
+  - Each worker consumes only the queue for its configured region and
+    verifies every job's region matches that configured region.
   - Load and validate current execution/monitor/probe state.
   - Execute the secure HTTP checker from the worker's real deployment region.
   - Persist the result and update regional probe state in a short,
@@ -785,15 +798,24 @@ MVP topology:
   - Central PostgreSQL.
   - Central Redis/BullMQ backing service.
   - Scheduler/publisher/reconciler process (may initially be co-located).
-  - India worker deployment in ap-south-1.
-  - USA worker deployment in us-east-1.
+  - Deploy the same generic worker image/code in ap-south-1 and us-east-1.
+  - Set WORKER_REGION_CODE independently for each deployment.
+  - Adding a region means adding supported region/queue/deployment
+    configuration and deploying the same worker artifact there; it must
+    not require creating a new region-specific source file.
 
 Deployment requirements:
   - Separate environment configuration for API, scheduler/publisher and
-    each regional worker.
-  - Region identity is explicit and validated at startup.
-  - Worker queue name is derived from a fixed allow-listed region mapping,
-    not arbitrary user input.
+    each worker deployment.
+  - The generic worker reads WORKER_REGION_CODE and validates it at startup.
+  - The same worker artifact is deployed in every region; only deployment
+    configuration (including WORKER_REGION_CODE and secrets/resources)
+    differs by region.
+  - Worker queue name is derived by shared code from the validated,
+    allow-listed region code, not arbitrary job/user input.
+  - Adding a region must not require a new worker source file or entry
+    point; it requires supported region configuration, its regional queue
+    provisioning/configuration, and a deployment of the existing artifact.
   - Secrets supplied through deployment secret management, never source.
   - Graceful shutdown and health/readiness endpoints.
   - Verify worker egress IP/location from each region.
@@ -903,7 +925,8 @@ reconciliation.
 Minimum release evidence:
   - Full test/type/build checks pass in CI.
   - Real PostgreSQL + Redis integration path passes.
-  - India and USA worker execution location is independently verified.
+  - The generic worker artifact is deployed in India and USA, and each
+    deployment's execution location is independently verified.
   - Duplicate publication/delivery does not duplicate durable result effects.
   - Redis outage and restart recover from PostgreSQL outbox.
   - Worker crash and stale attempt cannot corrupt accepted result.
@@ -959,6 +982,14 @@ D-010: Do not add speculative lease fields directly to monitor_probes.
 Reason: execution ownership, outbox publication and worker fencing must be
 designed as one coherent state model first.
 
+D-011: One generic region-configurable worker implementation is deployed
+into every enabled region.
+Reason: region-specific worker source files duplicate behavior and create
+unnecessary code/deployment drift as regions are added. A single worker
+artifact reads a validated WORKER_REGION_CODE, consumes that region's
+queue, and verifies job-region agreement. Adding a region is a supported
+configuration, queue and deployment operation, not a source-file fork.
+
 ======================================================================
 15. RESOLVED DESIGN DECISIONS AND REMAINING OPEN QUESTIONS
 ======================================================================
@@ -980,6 +1011,8 @@ and failure behavior still require tests):
      advances to the next future interval.
   I. BullMQ delivery is at-least-once; database effects are idempotent.
   J. No transaction spans an outbound HTTP request.
+  K. One generic worker codebase/entry point is deployed in every region;
+     WORKER_REGION_CODE selects the worker's region and regional queue.
 
 Still OPEN before or during runtime implementation:
   1. Exact scheduler SQL/locking strategy and how monitor/probe/region
@@ -1035,7 +1068,8 @@ NOT YET IMPLEMENTED / NOT VERIFIED:
   - Scheduler execution loop and concurrent due-probe claiming.
   - Reliable outbox publisher.
   - Redis Docker service and BullMQ runtime integration.
-  - India/USA queues and regional worker processes/deployments.
+  - India/USA queues and deployments of the generic region-configurable
+    worker artifact (no separate per-region worker source files).
   - Worker result persistence and runtime fencing enforcement.
   - Retry/stalled-job recovery and reconciliation runtime.
   - Queue-aware backpressure, global concurrency, regional and per-target
