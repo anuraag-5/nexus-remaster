@@ -9,6 +9,7 @@ describe("scheduler configuration", () => {
     expect(config).toEqual({
       SCHEDULER_POLL_INTERVAL_MS: 1_000,
       SCHEDULER_BATCH_SIZE: 100,
+      SCHEDULER_DB_POOL_MAX: 3,
     });
   });
 
@@ -16,11 +17,13 @@ describe("scheduler configuration", () => {
     const config = parseSchedulerConfig({
       SCHEDULER_POLL_INTERVAL_MS: "2000",
       SCHEDULER_BATCH_SIZE: "250",
+      SCHEDULER_DB_POOL_MAX: "5",
     });
 
     expect(config).toEqual({
       SCHEDULER_POLL_INTERVAL_MS: 2_000,
       SCHEDULER_BATCH_SIZE: 250,
+      SCHEDULER_DB_POOL_MAX: 5,
     });
   });
 
@@ -41,6 +44,17 @@ describe("scheduler configuration", () => {
       expect(() =>
         parseSchedulerConfig({
           SCHEDULER_BATCH_SIZE: value,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it.each(["0", "-1", "1.5", "invalid"])(
+    "rejects invalid database pool sizes: %s",
+    (value) => {
+      expect(() =>
+        parseSchedulerConfig({
+          SCHEDULER_DB_POOL_MAX: value,
         }),
       ).toThrow();
     },

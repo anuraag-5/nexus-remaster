@@ -9,6 +9,14 @@ const databaseEnvSchema = z.object({
         value.startsWith("postgresql://") || value.startsWith("postgres://"),
       "DATABASE_URL must be a PostgreSQL connection URL",
     ),
+
+  TEST_DATABASE_URL: z
+    .url()
+    .refine(
+      (value) =>
+        value.startsWith("postgresql://") || value.startsWith("postgres://"),
+      "DATABASE_URL must be a PostgreSQL connection URL",
+    ),
 });
 
 const result = databaseEnvSchema.safeParse(process.env);

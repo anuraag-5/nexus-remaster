@@ -10,7 +10,9 @@
     "check-types": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run --no-file-parallelism",
     "test:watch": "vitest --no-file-parallelism",
-    "migrate": "node-pg-migrate"
+    "migrate": "node-pg-migrate",
+    "scheduler:dev": "tsx watch src/scheduler/main.ts",
+    "scheduler:start": "node dist/scheduler/main.js"
   },
   "dependencies": {
     "@clerk/express": "^2.1.82",

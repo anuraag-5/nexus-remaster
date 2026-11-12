@@ -31,6 +31,7 @@ export function createSchedulerRunner(
 
   let loopPromise: Promise<void> | undefined;
   let stopController: AbortController | undefined;
+  let stopPromise: Promise<void> | undefined;
 
   async function runLoop(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
@@ -73,6 +74,9 @@ export function createSchedulerRunner(
           { err: error },
           "Scheduler polling wait failed",
         );
+
+        // An unexpected polling failure must not create a tight loop.
+        break;
       }
     }
   }
@@ -99,20 +103,30 @@ export function createSchedulerRunner(
     );
   }
 
-  async function stop(): Promise<void> {
+  function stop(): Promise<void> {
+    if (stopPromise) {
+      return stopPromise;
+    }
+
     const activeLoop = loopPromise;
 
     if (!activeLoop) {
-      return;
+      return Promise.resolve();
     }
 
     dependencies.logger.info({}, "Scheduler shutdown requested");
 
     stopController?.abort();
 
-    await activeLoop;
+    stopPromise = activeLoop
+      .then(() => {
+        dependencies.logger.info({}, "Scheduler runner stopped");
+      })
+      .finally(() => {
+        stopPromise = undefined;
+      });
 
-    dependencies.logger.info({}, "Scheduler runner stopped");
+    return stopPromise;
   }
 
   return {

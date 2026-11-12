@@ -9,6 +9,8 @@ const schedulerConfigSchema = z.object({
     .default(1_000),
 
   SCHEDULER_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(100),
+
+  SCHEDULER_DB_POOL_MAX: z.coerce.number().int().min(1).default(3),
 });
 
 export type SchedulerConfig = z.infer<typeof schedulerConfigSchema>;

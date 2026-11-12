@@ -20,6 +20,8 @@ const envSchema = z.object({
       "DATABASE_URL must be a PostgreSQL connection URL",
     ),
 
+  API_DB_POOL_MAX: z.coerce.number().int().min(1).default(10),
+
   CLERK_PUBLISHABLE_KEY: z.string().min(1),
   CLERK_SECRET_KEY: z.string().min(1),
   WEB_ORIGIN: z.url().default("http://localhost:3000"),

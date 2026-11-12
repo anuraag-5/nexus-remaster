@@ -1,12 +1,17 @@
 import { env } from "./config/env.js";
-import { pool } from "./lib/db.js";
 import { logger } from "./lib/logger.js";
 import { createApp } from "./app.js";
+import { createDatabasePool } from "./lib/db/create-pool.js";
 import { createMonitorService } from "./monitors/monitor.service.js";
 import { createWorkspaceService } from "./workspaces/workspace.service.js";
 import { clerkMiddleware, getAuth } from "@clerk/express";
 
 const port = env.PORT;
+const pool = createDatabasePool({
+  connectionString: env.DATABASE_URL,
+  max: env.API_DB_POOL_MAX,
+  applicationName: "nexus-api",
+});
 
 if (!Number.isInteger(port) || port < 1 || port > 65535) {
   throw new Error("PORT must be a valid TCP port");
