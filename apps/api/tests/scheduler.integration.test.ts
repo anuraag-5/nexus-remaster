@@ -141,11 +141,17 @@ describe("Scheduler service — PostgreSQL integration", () => {
   beforeAll(async () => {
     const result = await pool.query<{
       database_name: string;
-      migration_count: string;
+      publisher_fencing_column_exists: boolean;
     }>(
       `SELECT
-         current_database() AS database_name,
-         (SELECT COUNT(*) FROM pgmigrations)::text AS migration_count`,
+     current_database() AS database_name,
+     EXISTS (
+       SELECT 1
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'outbox_events'
+         AND column_name = 'publisher_fencing_token'
+     ) AS publisher_fencing_column_exists`,
     );
 
     const database = result.rows[0];
@@ -153,10 +159,10 @@ describe("Scheduler service — PostgreSQL integration", () => {
     if (
       !database ||
       database.database_name !== "nexus_test" ||
-      Number(database.migration_count) !== 4
+      !database.publisher_fencing_column_exists
     ) {
       throw new Error(
-        "Test database is not nexus_test or does not have exactly four migrations",
+        "Test database is not nexus_test or is missing the publisher fencing migration",
       );
     }
   });

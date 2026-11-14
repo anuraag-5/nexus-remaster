@@ -220,7 +220,7 @@ describe("Monitor execution and outbox — PostgreSQL invariants", () => {
     if (
       !database ||
       database.database_name !== "nexus_test" ||
-      Number(database.migration_count) !== 4
+      Number(database.migration_count) !== 5
     ) {
       throw new Error("Test database is not correctly migrated");
     }

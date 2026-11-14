@@ -108,7 +108,7 @@ describe("Monitor service — PostgreSQL integration", () => {
       throw new Error("Connected to the wrong database");
     }
 
-    if (Number(database.migration_count) !== 4) {
+    if (Number(database.migration_count) !== 5) {
       throw new Error(
         `Expected 4 migrations, found ${database.migration_count}`,
       );
