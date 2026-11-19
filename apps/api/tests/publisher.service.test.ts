@@ -1,0 +1,238 @@
+import type { Pool, PoolClient } from "pg";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { createPublisherService } from "../src/publisher/publisher.service.js";
+import type { ClaimedOutboxEvent } from "../src/publisher/publisher.types.js";
+
+const validInput = {
+  batchSize: 50,
+  leaseMs: 30_000,
+  publisherId: "publisher-test-1",
+};
+
+const claimedEvent: ClaimedOutboxEvent = {
+  id: "dispatch-event-1",
+  execution_id: "execution-1",
+  event_type: "monitor.check.requested",
+  publish_attempts: 1,
+  publisher_fencing_token: "1",
+  region_code: "ap-south-1",
+};
+
+describe("Publisher service", () => {
+  let pool: Pool;
+  let client: PoolClient;
+  let connect: ReturnType<typeof vi.fn>;
+  let query: ReturnType<typeof vi.fn>;
+  let release: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    query = vi.fn();
+    release = vi.fn();
+
+    client = {
+      query,
+      release,
+    } as unknown as PoolClient;
+
+    connect = vi.fn().mockResolvedValue(client);
+
+    pool = {
+      connect,
+    } as unknown as Pool;
+
+    query.mockImplementation(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+
+      return {
+        rows: [claimedEvent],
+        rowCount: 1,
+      };
+    });
+  });
+
+  it("claims due outbox events and commits the transaction", async () => {
+    const service = createPublisherService(pool);
+
+    const result = await service.claimDueOutboxEvents(validInput);
+
+    expect(result).toEqual({
+      claimedCount: 1,
+      events: [claimedEvent],
+    });
+
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(3);
+
+    const [beginCall, claimCall, commitCall] = query.mock.calls;
+
+    expect(beginCall?.[0]).toBe("BEGIN");
+    expect(commitCall?.[0]).toBe("COMMIT");
+
+    expect(claimCall?.[0]).toContain("FOR UPDATE OF e SKIP LOCKED");
+
+    expect(claimCall?.[0]).toContain(
+      "publisher_fencing_token = e.publisher_fencing_token + 1",
+    );
+
+    expect(claimCall?.[0]).toContain(
+      "publish_attempts = e.publish_attempts + 1",
+    );
+
+    expect(claimCall?.[1]).toEqual([
+      validInput.batchSize,
+      validInput.publisherId,
+      validInput.leaseMs,
+    ]);
+
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("returns an empty result when no events are eligible", async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT") {
+        return { rows: [], rowCount: 0 };
+      }
+
+      return { rows: [], rowCount: 0 };
+    });
+
+    const service = createPublisherService(pool);
+
+    await expect(service.claimDueOutboxEvents(validInput)).resolves.toEqual({
+      claimedCount: 0,
+      events: [],
+    });
+
+    expect(query).toHaveBeenCalledWith("COMMIT");
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an invalid batch size before acquiring a client", async () => {
+    const service = createPublisherService(pool);
+
+    await expect(
+      service.claimDueOutboxEvents({
+        ...validInput,
+        batchSize: 0,
+      }),
+    ).rejects.toThrow("batch size");
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects a batch size above the maximum", async () => {
+    const service = createPublisherService(pool);
+
+    await expect(
+      service.claimDueOutboxEvents({
+        ...validInput,
+        batchSize: 501,
+      }),
+    ).rejects.toThrow("batch size");
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-integer batch size", async () => {
+    const service = createPublisherService(pool);
+
+    await expect(
+      service.claimDueOutboxEvents({
+        ...validInput,
+        batchSize: 1.5,
+      }),
+    ).rejects.toThrow("batch size");
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid lease duration", async () => {
+    const service = createPublisherService(pool);
+
+    await expect(
+      service.claimDueOutboxEvents({
+        ...validInput,
+        leaseMs: 0,
+      }),
+    ).rejects.toThrow("lease duration");
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty publisher ID", async () => {
+    const service = createPublisherService(pool);
+
+    await expect(
+      service.claimDueOutboxEvents({
+        ...validInput,
+        publisherId: "   ",
+      }),
+    ).rejects.toThrow("Publisher ID");
+
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("rolls back when the claim query fails", async () => {
+    const claimError = new Error("Database claim failed");
+
+    query.mockImplementation(async (sql: string) => {
+      if (sql === "BEGIN") {
+        return { rows: [], rowCount: 0 };
+      }
+
+      if (sql === "ROLLBACK") {
+        return { rows: [], rowCount: 0 };
+      }
+
+      throw claimError;
+    });
+
+    const service = createPublisherService(pool);
+
+    await expect(service.claimDueOutboxEvents(validInput)).rejects.toThrow(
+      "Database claim failed",
+    );
+
+    expect(query).toHaveBeenCalledWith("ROLLBACK");
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("releases the client even when rollback fails", async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql === "BEGIN") {
+        return { rows: [], rowCount: 0 };
+      }
+
+      if (sql === "ROLLBACK") {
+        throw new Error("Rollback failed");
+      }
+
+      throw new Error("Claim failed");
+    });
+
+    const service = createPublisherService(pool);
+
+    await expect(service.claimDueOutboxEvents(validInput)).rejects.toThrow(
+      "Claim failed",
+    );
+
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("does not release a client when connection acquisition fails", async () => {
+    connect.mockRejectedValueOnce(new Error("Connection unavailable"));
+
+    const service = createPublisherService(pool);
+
+    await expect(service.claimDueOutboxEvents(validInput)).rejects.toThrow(
+      "Connection unavailable",
+    );
+
+    expect(release).not.toHaveBeenCalled();
+  });
+});
