@@ -21,6 +21,7 @@ const claimedEvent: ClaimedOutboxEvent = {
 
 describe("Publisher service", () => {
   let pool: Pool;
+  let poolQuery: ReturnType<typeof vi.fn>;
   let client: PoolClient;
   let connect: ReturnType<typeof vi.fn>;
   let query: ReturnType<typeof vi.fn>;
@@ -29,6 +30,7 @@ describe("Publisher service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    poolQuery = vi.fn();
     query = vi.fn();
     release = vi.fn();
 
@@ -41,6 +43,7 @@ describe("Publisher service", () => {
 
     pool = {
       connect,
+      query: poolQuery,
     } as unknown as Pool;
 
     query.mockImplementation(async (sql: string) => {
@@ -234,5 +237,145 @@ describe("Publisher service", () => {
     );
 
     expect(release).not.toHaveBeenCalled();
+  });
+
+  const validAcknowledgementInput = {
+    eventId: "dispatch-event-1",
+    publisherId: "publisher-test-1",
+    publisherFencingToken: "1",
+  };
+
+  describe("acknowledgePublishedEvent", () => {
+    it("acknowledges an event owned by the current publisher", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [{ id: "dispatch-event-1" }],
+        rowCount: 1,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent(validAcknowledgementInput),
+      ).resolves.toBe(true);
+
+      expect(poolQuery).toHaveBeenCalledOnce();
+
+      const [sql, params] = poolQuery.mock.calls[0]!;
+
+      expect(sql).toContain("status = 'published'");
+      expect(sql).toContain("locked_by = NULL");
+      expect(sql).toContain("lease_expires_at = NULL");
+      expect(sql).toContain("publisher_fencing_token = $3::bigint");
+      expect(sql).toContain("lease_expires_at > clock_timestamp()");
+      expect(sql).toContain("RETURNING id");
+
+      expect(params).toEqual(["dispatch-event-1", "publisher-test-1", "1"]);
+    });
+
+    it("returns false when the publisher no longer owns the event", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent(validAcknowledgementInput),
+      ).resolves.toBe(false);
+    });
+
+    it("returns false when the fencing token is stale", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent({
+          ...validAcknowledgementInput,
+          publisherFencingToken: "1",
+        }),
+      ).resolves.toBe(false);
+    });
+
+    it("returns false when the lease has expired", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent(validAcknowledgementInput),
+      ).resolves.toBe(false);
+    });
+
+    it("returns false when the event is already published", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent(validAcknowledgementInput),
+      ).resolves.toBe(false);
+    });
+
+    it("rejects an empty event ID before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent({
+          ...validAcknowledgementInput,
+          eventId: " ",
+        }),
+      ).rejects.toThrow("Outbox event ID");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects an empty publisher ID before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent({
+          ...validAcknowledgementInput,
+          publisherId: " ",
+        }),
+      ).rejects.toThrow("Publisher ID");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid fencing token before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent({
+          ...validAcknowledgementInput,
+          publisherFencingToken: "1.5",
+        }),
+      ).rejects.toThrow("fencing token");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("propagates database errors", async () => {
+      poolQuery.mockRejectedValueOnce(
+        new Error("Acknowledgement database failure"),
+      );
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.acknowledgePublishedEvent(validAcknowledgementInput),
+      ).rejects.toThrow("Acknowledgement database failure");
+    });
   });
 });

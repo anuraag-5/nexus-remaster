@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 
 import { logger } from "../lib/logger.js";
 import type {
+  AcknowledgePublishedEventInput,
   ClaimOutboxEventsInput,
   ClaimOutboxEventsResult,
   ClaimedOutboxEvent,
@@ -13,6 +14,35 @@ export class InvalidPublisherClaimInputError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidPublisherClaimInputError";
+  }
+}
+
+export class InvalidPublisherAcknowledgementInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPublisherAcknowledgementInputError";
+  }
+}
+
+function validateAcknowledgementInput(
+  input: AcknowledgePublishedEventInput,
+): void {
+  if (!input.eventId.trim()) {
+    throw new InvalidPublisherAcknowledgementInputError(
+      "Outbox event ID must not be empty",
+    );
+  }
+
+  if (!input.publisherId.trim()) {
+    throw new InvalidPublisherAcknowledgementInputError(
+      "Publisher ID must not be empty",
+    );
+  }
+
+  if (!/^\d+$/.test(input.publisherFencingToken)) {
+    throw new InvalidPublisherAcknowledgementInputError(
+      "Publisher fencing token must be a non-negative integer string",
+    );
   }
 }
 
@@ -154,7 +184,36 @@ export function createPublisherService(pool: Pool) {
     }
   }
 
+  async function acknowledgePublishedEvent(
+    input: AcknowledgePublishedEventInput,
+  ): Promise<boolean> {
+    validateAcknowledgementInput(input);
+
+    const result = await pool.query<{ id: string }>(
+      `
+      UPDATE outbox_events
+      SET
+        status = 'published',
+        published_at = transaction_timestamp(),
+        locked_by = NULL,
+        lease_expires_at = NULL,
+        last_error = NULL,
+        updated_at = transaction_timestamp()
+      WHERE
+        id = $1
+        AND status = 'publishing'
+        AND locked_by = $2
+        AND publisher_fencing_token = $3::bigint
+        AND lease_expires_at > clock_timestamp()
+      RETURNING id
+    `,
+      [input.eventId, input.publisherId, input.publisherFencingToken],
+    );
+
+    return result.rows.length === 1;
+  }
   return {
     claimDueOutboxEvents,
+    acknowledgePublishedEvent
   };
 }

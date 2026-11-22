@@ -17,3 +17,9 @@ export type ClaimOutboxEventsResult = {
   claimedCount: number;
   events: ClaimedOutboxEvent[];
 };
+
+export type AcknowledgePublishedEventInput = {
+  eventId: string;
+  publisherId: string;
+  publisherFencingToken: string;
+};
