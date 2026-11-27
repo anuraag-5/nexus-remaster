@@ -69,7 +69,6 @@ describe("Publisher service", () => {
     });
 
     expect(query).toHaveBeenCalledTimes(3);
-    expect(query).toHaveBeenCalledTimes(3);
 
     const [beginCall, claimCall, commitCall] = query.mock.calls;
 
@@ -245,6 +244,13 @@ describe("Publisher service", () => {
     publisherFencingToken: "1",
   };
 
+  const validReleaseInput = {
+    eventId: "dispatch-event-1",
+    publisherId: "publisher-test-1",
+    publisherFencingToken: "1",
+    errorMessage: "Redis connection failed",
+  };
+
   describe("acknowledgePublishedEvent", () => {
     it("acknowledges an event owned by the current publisher", async () => {
       poolQuery.mockResolvedValueOnce({
@@ -376,6 +382,154 @@ describe("Publisher service", () => {
       await expect(
         service.acknowledgePublishedEvent(validAcknowledgementInput),
       ).rejects.toThrow("Acknowledgement database failure");
+    });
+  });
+
+  describe("releaseFailedOutboxEvent", () => {
+    it("releases a failed event and schedules exponential backoff", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [{ id: "dispatch-event-1" }],
+        rowCount: 1,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent(validReleaseInput),
+      ).resolves.toBe(true);
+
+      expect(poolQuery).toHaveBeenCalledOnce();
+
+      const [sql, params] = poolQuery.mock.calls[0]!;
+
+      expect(sql).toContain("status = 'pending'");
+      expect(sql).toContain("available_at = clock_timestamp()");
+      expect(sql).toContain("GREATEST(publish_attempts - 1, 0)");
+      expect(sql).toContain("60000::bigint");
+      expect(sql).toContain("locked_by = NULL");
+      expect(sql).toContain("lease_expires_at = NULL");
+      expect(sql).toContain("last_error = $4");
+      expect(sql).toContain("publisher_fencing_token = $3::bigint");
+      expect(sql).toContain("lease_expires_at > clock_timestamp()");
+      expect(sql).toContain("RETURNING id");
+
+      expect(params).toEqual([
+        "dispatch-event-1",
+        "publisher-test-1",
+        "1",
+        "Redis connection failed",
+      ]);
+    });
+
+    it("returns false when the publisher no longer owns the event", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      });
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent(validReleaseInput),
+      ).resolves.toBe(false);
+    });
+
+    it("normalizes control characters in the stored error message", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [{ id: "dispatch-event-1" }],
+        rowCount: 1,
+      });
+
+      const service = createPublisherService(pool);
+
+      await service.releaseFailedOutboxEvent({
+        ...validReleaseInput,
+        errorMessage: " Redis\nconnection\tfailed ",
+      });
+
+      const [, params] = poolQuery.mock.calls[0]!;
+
+      expect(params?.[3]).toBe("Redis connection failed");
+    });
+
+    it("limits the stored error message to 1000 characters", async () => {
+      poolQuery.mockResolvedValueOnce({
+        rows: [{ id: "dispatch-event-1" }],
+        rowCount: 1,
+      });
+
+      const service = createPublisherService(pool);
+
+      await service.releaseFailedOutboxEvent({
+        ...validReleaseInput,
+        errorMessage: "x".repeat(1500),
+      });
+
+      const [, params] = poolQuery.mock.calls[0]!;
+
+      expect(params?.[3]).toHaveLength(1000);
+    });
+
+    it("rejects an empty event ID before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent({
+          ...validReleaseInput,
+          eventId: " ",
+        }),
+      ).rejects.toThrow("Outbox event ID");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects an empty publisher ID before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent({
+          ...validReleaseInput,
+          publisherId: " ",
+        }),
+      ).rejects.toThrow("Publisher ID");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects an invalid fencing token before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent({
+          ...validReleaseInput,
+          publisherFencingToken: "1.5",
+        }),
+      ).rejects.toThrow("fencing token");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("rejects an empty error message before querying the database", async () => {
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent({
+          ...validReleaseInput,
+          errorMessage: " ",
+        }),
+      ).rejects.toThrow("error message");
+
+      expect(poolQuery).not.toHaveBeenCalled();
+    });
+
+    it("propagates database errors", async () => {
+      poolQuery.mockRejectedValueOnce(new Error("Release database failure"));
+
+      const service = createPublisherService(pool);
+
+      await expect(
+        service.releaseFailedOutboxEvent(validReleaseInput),
+      ).rejects.toThrow("Release database failure");
     });
   });
 });

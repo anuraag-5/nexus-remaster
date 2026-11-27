@@ -23,3 +23,10 @@ export type AcknowledgePublishedEventInput = {
   publisherId: string;
   publisherFencingToken: string;
 };
+
+export type ReleaseOutboxEventInput = {
+  eventId: string;
+  publisherId: string;
+  publisherFencingToken: string;
+  errorMessage: string;
+};

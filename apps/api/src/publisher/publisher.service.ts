@@ -6,9 +6,19 @@ import type {
   ClaimOutboxEventsInput,
   ClaimOutboxEventsResult,
   ClaimedOutboxEvent,
+  ReleaseOutboxEventInput,
 } from "./publisher.types.js";
 
 const MAX_BATCH_SIZE = 500;
+const MAX_ERROR_MESSAGE_LENGTH = 1000;
+
+function normalizeErrorMessage(message: string): string {
+  return message
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_ERROR_MESSAGE_LENGTH);
+}
 
 export class InvalidPublisherClaimInputError extends Error {
   constructor(message: string) {
@@ -21,6 +31,13 @@ export class InvalidPublisherAcknowledgementInputError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "InvalidPublisherAcknowledgementInputError";
+  }
+}
+
+export class InvalidPublisherReleaseInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidPublisherReleaseInputError";
   }
 }
 
@@ -65,6 +82,32 @@ function validateInput(input: ClaimOutboxEventsInput): void {
 
   if (!input.publisherId.trim()) {
     throw new InvalidPublisherClaimInputError("Publisher ID must not be empty");
+  }
+}
+
+function validateReleaseInput(input: ReleaseOutboxEventInput): void {
+  if (!input.eventId.trim()) {
+    throw new InvalidPublisherReleaseInputError(
+      "Outbox event ID must not be empty",
+    );
+  }
+
+  if (!input.publisherId.trim()) {
+    throw new InvalidPublisherReleaseInputError(
+      "Publisher ID must not be empty",
+    );
+  }
+
+  if (!/^\d+$/.test(input.publisherFencingToken)) {
+    throw new InvalidPublisherReleaseInputError(
+      "Publisher fencing token must be a non-negative integer string",
+    );
+  }
+
+  if (!input.errorMessage.trim()) {
+    throw new InvalidPublisherReleaseInputError(
+      "Publisher error message must not be empty",
+    );
   }
 }
 
@@ -212,8 +255,62 @@ export function createPublisherService(pool: Pool) {
 
     return result.rows.length === 1;
   }
+
+  async function releaseFailedOutboxEvent(
+    input: ReleaseOutboxEventInput,
+  ): Promise<boolean> {
+    validateReleaseInput(input);
+
+    const errorMessage = normalizeErrorMessage(input.errorMessage);
+
+    if (!errorMessage) {
+      throw new InvalidPublisherReleaseInputError(
+        "Publisher error message must contain printable characters",
+      );
+    }
+
+    const result = await pool.query<{ id: string }>(
+      `
+      UPDATE outbox_events
+      SET
+        status = 'pending',
+        available_at = clock_timestamp() +
+          (
+            LEAST(
+              1000::bigint * (
+                1::bigint << LEAST(
+                  GREATEST(publish_attempts - 1, 0),
+                  6
+                )
+              ),
+              60000::bigint
+            ) * INTERVAL '1 millisecond'
+          ),
+        locked_by = NULL,
+        lease_expires_at = NULL,
+        last_error = $4,
+        updated_at = transaction_timestamp()
+      WHERE
+        id = $1
+        AND status = 'publishing'
+        AND locked_by = $2
+        AND publisher_fencing_token = $3::bigint
+        AND lease_expires_at > clock_timestamp()
+      RETURNING id
+    `,
+      [
+        input.eventId,
+        input.publisherId,
+        input.publisherFencingToken,
+        errorMessage,
+      ],
+    );
+
+    return result.rows.length === 1;
+  }
   return {
     claimDueOutboxEvents,
-    acknowledgePublishedEvent
+    acknowledgePublishedEvent,
+    releaseFailedOutboxEvent,
   };
 }
